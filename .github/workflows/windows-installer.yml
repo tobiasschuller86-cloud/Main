@@ -635,6 +635,9 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Test signed-output assertions without packaging
+        shell: pwsh
+        run: ./scripts/test-signed-output-assertions.ps1
       - uses: pnpm/action-setup@v4
         with:
           version: 10.26.1

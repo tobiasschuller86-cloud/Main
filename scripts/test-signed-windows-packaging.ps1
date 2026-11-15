@@ -40,7 +40,7 @@ function Assert-TrustedSignedOutput {
     $signature.SignerCertificate.Thumbprint -eq $ExpectedThumbprint
   ) "$Description signature does not match the temporary test publisher."
   Assert-True (
-    $signature.TimeStamperCertificate
+    $null -ne $signature.TimeStamperCertificate
   ) "$Description does not have a trusted timestamp."
 }
 
