@@ -597,7 +597,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Test Windows update availability checks
         working-directory: artifacts/tt-turnier
-        run: node --test electron/update-check.test.cjs electron/external-links.test.cjs electron/release-config.test.cjs electron/windows-zip-update.test.cjs scripts/windows-recovery-smoke.test.mjs scripts/windows-overview-smoke.test.mjs
+        run: node --test electron/update-check.test.cjs electron/external-links.test.cjs electron/release-config.test.cjs electron/windows-zip-update.test.cjs scripts/windows-recovery-smoke.test.mjs scripts/windows-overview-smoke.test.mjs scripts/windows-devtools-smoke.test.mjs
       - name: Test mocked Windows release asset verification
         run: bash ./scripts/test-windows-release-assets.sh
       - name: Test Windows release upload rollback and retry

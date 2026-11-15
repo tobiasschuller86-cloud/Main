@@ -199,42 +199,71 @@ async function findAppPage() {
   );
 }
 
+const devtoolsConnections = new Map();
+
 function sendDevtoolsCommand(webSocketUrl, method, params = {}) {
-  return new Promise((resolve, reject) => {
+  let connection = devtoolsConnections.get(webSocketUrl);
+  if (!connection || connection.socket.readyState > 1) {
     const socket = new WebSocket(webSocketUrl);
-    const timeout = setTimeout(() => {
-      socket.close();
-      reject(new Error('Timed out while checking the installed app screen.'));
-    }, 10_000);
-
+    connection = { socket, pending: new Map(), nextId: 1 };
+    const current = connection;
+    current.fail = (error) => {
+      if (devtoolsConnections.get(webSocketUrl) === current) devtoolsConnections.delete(webSocketUrl);
+      for (const request of current.pending.values()) {
+        clearTimeout(request.timeout);
+        request.reject(error);
+      }
+      current.pending.clear();
+      if (socket.readyState < 2) socket.close();
+    };
+    current.send = (request) => {
+      try {
+        socket.send(JSON.stringify(request.command));
+      } catch (error) {
+        current.fail(error);
+      }
+    };
+    devtoolsConnections.set(webSocketUrl, current);
     socket.addEventListener('open', () => {
-      socket.send(
-        JSON.stringify({
-          id: 1,
-          method,
-          params,
-        }),
-      );
+      for (const request of current.pending.values()) current.send(request);
     });
-
     socket.addEventListener('message', (event) => {
-      const message = JSON.parse(event.data);
-      if (message.id !== 1) return;
-
-      clearTimeout(timeout);
-      socket.close();
-      if (message.error) {
-        reject(new Error(`The installed app rejected ${method}: ${message.error.message}`));
+      let message;
+      try {
+        message = JSON.parse(event.data);
+      } catch {
+        current.fail(new Error('The installed app sent an invalid debugging response.'));
         return;
       }
-
-      resolve(message.result);
+      const request = current.pending.get(message.id);
+      if (!request) return;
+      current.pending.delete(message.id);
+      clearTimeout(request.timeout);
+      if (message.error) {
+        request.reject(new Error(`The installed app rejected ${request.command.method}: ${message.error.message}`));
+      } else {
+        request.resolve(message.result);
+      }
     });
-
     socket.addEventListener('error', () => {
-      clearTimeout(timeout);
-      reject(new Error('Could not connect to the installed app page.'));
+      current.fail(new Error('Could not connect to the installed app page.'));
     });
+    socket.addEventListener('close', () => {
+      current.fail(new Error('The installed app debugging connection closed.'));
+    });
+  }
+  // DOM node IDs belong to this session. Keep it open across document lookup,
+  // file-input lookup, and file selection, until the page or process closes.
+  return new Promise((resolve, reject) => {
+    const command = { id: connection.nextId++, method, params };
+    const request = {
+      command, resolve, reject,
+      timeout: setTimeout(() => {
+        connection.fail(new Error('Timed out while checking the installed app screen.'));
+      }, 10_000),
+    };
+    connection.pending.set(command.id, request);
+    if (connection.socket.readyState === 1) connection.send(request);
   });
 }
 
