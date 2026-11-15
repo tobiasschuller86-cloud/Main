@@ -19,7 +19,7 @@ protocol.registerSchemesAsPrivileged([
 
 const publicDirectory = path.resolve(__dirname, '../dist/public');
 app.setPath('userData', path.join(app.getPath('appData'), 'Tischtennis-Turnier'));
-registerDurableStorageHandlers(ipcMain, createDurableStorage(app.getPath('userData')));
+registerDurableStorageHandlers(ipcMain, createDurableStorage(app.getPath('userData')), console.error, console.info);
 const mimeTypes = {
   '.css': 'text/css; charset=utf-8',
   '.html': 'text/html; charset=utf-8',

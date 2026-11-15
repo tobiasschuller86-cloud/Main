@@ -6,6 +6,13 @@ import { EventEmitter } from 'node:events';
 import { win32 } from 'node:path';
 
 const source = await readFile(new URL('./windows-installer-smoke.mjs', import.meta.url), 'utf8');
+
+test('all smoke failures report bounded app output and Windows context before cleanup', () => {
+  const failureHandler = source.slice(source.lastIndexOf('} catch (error) {'));
+  assert.match(failureHandler, /appProcess\?\.startupDiagnostics/);
+  assert.match(failureHandler, /describeWindowsStartup\(appProcess\.pid\)/);
+  assert.ok(failureHandler.indexOf('throw error') < failureHandler.indexOf('await stopApp'));
+});
 const helper = source.slice(
   source.indexOf('async function verifyInitialOverview('),
   source.indexOf('async function verifyReleaseNotesLink('),

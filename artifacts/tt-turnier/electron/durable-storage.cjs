@@ -74,18 +74,23 @@ function trustedStorageSender(event) {
   }
 }
 
-function registerDurableStorageHandlers(ipcMain, storage, reportError = console.error) {
+function registerDurableStorageHandlers(ipcMain, storage, reportError = console.error, reportOperation = () => {}) {
   for (const [channel, operation, message] of [
     ['tt-turnier:load-storage', () => storage.load(), 'Die lokale Turnierdatei konnte nicht gelesen werden. Gespeicherte Daten wurden nicht ersetzt.'],
     ['tt-turnier:save-storage', (raw) => storage.save(raw), 'Die Änderung konnte nicht dauerhaft gespeichert werden. Bitte prüfe Speicherplatz und Schreibrechte.'],
   ]) {
+    let firstRequest = true;
     ipcMain.on(channel, (event, raw) => {
-      if (!trustedStorageSender(event)) {
-        event.returnValue = { ok: false, message: 'Nicht erlaubter Zugriff auf die lokalen Turnierdaten.' };
-        return;
-      }
       try {
+        if (!trustedStorageSender(event)) {
+          event.returnValue = { ok: false, message: 'Nicht erlaubter Zugriff auf die lokalen Turnierdaten.' };
+          return;
+        }
+        const trace = firstRequest;
+        firstRequest = false;
+        if (trace) reportOperation(`${channel}: started`);
         event.returnValue = { ok: true, raw: operation(raw) ?? null };
+        if (trace) reportOperation(`${channel}: completed`);
       } catch (error) {
         reportError('Desktop tournament storage failed:', error.code || error.name);
         event.returnValue = { ok: false, message };

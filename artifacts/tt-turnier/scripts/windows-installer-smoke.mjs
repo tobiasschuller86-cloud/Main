@@ -1421,6 +1421,10 @@ try {
     console.log('The tournament, scheduled match, and result remained available after uninstall and reinstall.');
     await importPreUpdateBackup(appPage.webSocketDebuggerUrl, preUpdateBackup);
   }
+} catch (error) {
+  console.error(`Windows smoke application output (last 8000 characters): ${appProcess?.startupDiagnostics || 'No application output was captured.'}`);
+  console.error(`Windows smoke process context: ${appProcess ? describeWindowsStartup(appProcess.pid) : 'No active app process.'}`);
+  throw error;
 } finally {
   try {
     if (appProcess) await stopApp(appProcess, appPage?.webSocketDebuggerUrl);

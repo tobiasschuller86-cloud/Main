@@ -104,3 +104,31 @@ test('only the main app frame can read or write; failures are returned without l
   assert.equal(store.load(), snapshot('Allowed'));
   assert.ok(!JSON.stringify(reports).includes('private content'));
 });
+
+test('startup traces contain only operation names and are limited to the first read and write', () => {
+  const handlers = new Map();
+  const traces = [];
+  registerDurableStorageHandlers({ on: (channel, fn) => handlers.set(channel, fn) },
+    { load: () => snapshot('Private name'), save() {} }, assert.fail, (message) => traces.push(message));
+  const frame = { url: 'ttturnier://app/' };
+  const event = { senderFrame: frame, sender: { mainFrame: frame } };
+  for (let count = 0; count < 3; count++) {
+    handlers.get('tt-turnier:load-storage')(event);
+    handlers.get('tt-turnier:save-storage')(event, snapshot('Private name'));
+  }
+  assert.deepEqual(traces, [
+    'tt-turnier:load-storage: started', 'tt-turnier:load-storage: completed',
+    'tt-turnier:save-storage: started', 'tt-turnier:save-storage: completed',
+  ]);
+});
+
+test('a disposed sender frame returns an error instead of leaving synchronous IPC unanswered', () => {
+  const handlers = new Map();
+  const reports = [];
+  registerDurableStorageHandlers({ on: (channel, fn) => handlers.set(channel, fn) },
+    { load: assert.fail, save: assert.fail }, (...args) => reports.push(args));
+  const event = { get senderFrame() { throw new Error('Frame disposed'); } };
+  handlers.get('tt-turnier:load-storage')(event);
+  assert.equal(event.returnValue.ok, false);
+  assert.equal(reports.length, 1);
+});
