@@ -103,7 +103,7 @@ function verifyStandardUserContext() {
       '-NoProfile',
       '-NonInteractive',
       '-Command',
-      '[Security.Principal.WindowsPrincipal]([Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)',
+      '$principal = [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent()); $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)',
     ],
     { encoding: 'utf8', windowsHide: true },
   );

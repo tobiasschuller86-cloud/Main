@@ -10,6 +10,28 @@ const helper = source.slice(
   source.indexOf('async function verifyReleaseNotesLink('),
 );
 
+for (const [label, output, accepted] of [
+  ['standard account', 'False\r\n', true],
+  ['administrator', 'True\r\n', false],
+  ['invalid role response', '', false],
+]) {
+  test(`Windows role check ${accepted ? 'accepts' : 'rejects'} ${label}`, () => {
+    const roleCheck = source.slice(source.indexOf('function verifyStandardUserContext('), source.indexOf('async function verifyUnicodeProfileContext('));
+    const context = vm.createContext({
+      console: { log() {} },
+      spawnSync: (_file, args) => {
+        const command = args.at(-1);
+        assert.match(command, /\$principal = \[Security\.Principal\.WindowsPrincipal\]::new\(/);
+        assert.match(command, /\$principal\.IsInRole\(/);
+        return { status: 0, stdout: output };
+      },
+    });
+    vm.runInContext(`${roleCheck}\nglobalThis.check = verifyStandardUserContext;`, context);
+    if (accepted) context.check();
+    else assert.throws(() => context.check(), /requires a non-administrator user/);
+  });
+}
+
 test('app launch retains bounded startup diagnostics without changing security arguments', () => {
   const child = new EventEmitter();
   child.stdout = new EventEmitter();
