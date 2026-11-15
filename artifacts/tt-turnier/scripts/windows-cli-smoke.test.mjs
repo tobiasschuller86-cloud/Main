@@ -19,7 +19,8 @@ function parse(args) {
   });
   vm.runInContext(`${parsing}
     globalThis.configuration = { executablePath, zipSmoke, windowsSessionSmoke,
-      windowsSessionSaveSmoke, windowsSessionResumeSmoke, standardUserSmoke };`, context);
+      windowsSessionSaveSmoke, windowsSessionResumeSmoke, standardUserSmoke,
+      installerPath, installDirectory, alternateInstallDirectory, updatedZipExecutablePath };`, context);
   return context.configuration;
 }
 
@@ -45,6 +46,16 @@ for (const mode of ['--zip', '--zip-isolated', '--zip-existing', '--zip-return',
 
 test('ZIP update accepts distinct old and updated executables', () => {
   assert.equal(parse(['--zip-update', app, updated, '--standard-user']).zipSmoke, true);
+});
+
+test('native installer paths are canonical even when the script runner doubles backslashes', () => {
+  const doubled = (value) => value.replaceAll('\\', '\\\\');
+  const configuration = parse([app, installer, firstDirectory, secondDirectory].map(doubled));
+  assert.equal(configuration.executablePath, app);
+  assert.equal(configuration.installerPath, installer);
+  assert.equal(configuration.installDirectory, firstDirectory);
+  assert.equal(configuration.alternateInstallDirectory, secondDirectory);
+  assert.equal(parse(['--zip-update', doubled(app), doubled(updated), '--standard-user']).updatedZipExecutablePath, updated);
 });
 
 test('long-path launch keeps its administrator-only test contract', () => {
@@ -134,11 +145,30 @@ test('a successful uninstaller exit cannot bypass the executable-removal check',
     uninstallInstalledFiles: async () => {},
     stat: async () => ({}),
     delay: async (milliseconds) => { clock += milliseconds; },
-    describeRemainingInstalledProcesses: () => '[{"Id":123}]',
+    describeInstalledAppUninstallState: () => '[{"Id":123}]',
     runInstaller: () => assert.fail('Must not reinstall while the old executable remains'),
   });
   const reinstall = source.slice(source.indexOf('async function reinstallInstalledApp('), source.indexOf('async function updateInstalledAppInPlace('));
   vm.runInContext(`${reinstall}\nglobalThis.reinstall = reinstallInstalledApp;`, context);
   await assert.rejects(context.reinstall(), /executable remained after uninstalling.*123/);
   assert.equal(clock, 30000);
+});
+
+test('uninstall inspection queries only this app, uses UTF-8, and reports inspection failures', () => {
+  let fail = false;
+  const context = vm.createContext({
+    spawnSync: (_file, args, options) => {
+      const command = args.at(-1);
+      assert.ok(command.includes("'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*'"));
+      assert.ok(command.includes("Where-Object { $_.DisplayName -eq 'Tischtennis-Turnier' }"));
+      assert.ok(command.includes('[Console]::OutputEncoding'));
+      assert.ok(command.includes('Select-Object InstallLocation,PSPath'));
+      assert.equal(options.timeout, 10000);
+      return fail ? { status: 1, stderr: 'Inspection denied' } : { status: 0, stdout: '{"Registrations":[]}' };
+    },
+  });
+  vm.runInContext(`${uninstallHelpers}\nglobalThis.inspect = describeInstalledAppUninstallState;`, context);
+  assert.equal(context.inspect(), '{"Registrations":[]}');
+  fail = true;
+  assert.match(context.inspect(), /Uninstall inspection failed: Inspection denied/);
 });

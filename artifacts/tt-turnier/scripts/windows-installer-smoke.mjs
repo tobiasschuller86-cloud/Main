@@ -23,10 +23,10 @@ const zipSmoke =
 const standardUserSmoke = process.argv.includes('--standard-user');
 const unicodeProfileSmoke = process.argv.includes('--unicode-profile');
 let executablePath = zipSmoke || windowsSessionSmoke ? process.argv[3] : process.argv[2];
-const updatedZipExecutablePath = zipUpdateSmoke ? process.argv[4] : undefined;
-const installerPath = zipSmoke ? undefined : process.argv[3];
-const installDirectory = zipSmoke ? undefined : process.argv[4];
-const alternateInstallDirectory = zipSmoke ? undefined : process.argv[5];
+const updatedZipExecutablePath = zipUpdateSmoke && process.argv[4] ? resolve(process.argv[4]) : undefined;
+const installerPath = !zipSmoke && !windowsSessionSmoke && process.argv[3] ? resolve(process.argv[3]) : undefined;
+const installDirectory = !zipSmoke && !windowsSessionSmoke && process.argv[4] ? resolve(process.argv[4]) : undefined;
+const alternateInstallDirectory = !zipSmoke && !windowsSessionSmoke && process.argv[5] ? resolve(process.argv[5]) : undefined;
 if (
   !executablePath ||
   (windowsSessionSaveSmoke && windowsSessionResumeSmoke) ||
@@ -44,6 +44,7 @@ if (
     'Pass --zip, --zip-existing, --zip-return, or --zip-second-return with an extracted ZIP executable path as applicable; --zip-long-path with a near-limit path; --zip-update with old and new ZIP executable paths; --windows-session-save or --windows-session-resume with an installed executable path; or the installed executable path, installer path, and two install directories. Standard-user modes require --standard-user; --unicode-profile also requires --zip.',
   );
 }
+executablePath = resolve(executablePath);
 if (zipLongPathSmoke && (executablePath.length < 240 || executablePath.length > 259)) {
   throw new Error(
     `The near-limit ZIP smoke test requires an executable path between 240 and 259 characters; received ${executablePath.length}.`,
@@ -463,12 +464,31 @@ async function uninstallInstalledFiles(uninstallerName) {
   }
 }
 
-function describeRemainingInstalledProcesses() {
+function describeInstalledAppUninstallState() {
   const result = spawnSync('powershell.exe', [
     '-NoProfile', '-NonInteractive', '-Command',
-    "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); Get-Process -Name 'Tischtennis-Turnier' -ErrorAction SilentlyContinue | Select-Object Id,Path,SessionId | ConvertTo-Json -Compress",
-  ], { encoding: 'utf8', windowsHide: true, timeout: 10_000, maxBuffer: 8192 });
-  return result.error?.message || result.stdout?.trim().slice(-4000) || 'No remaining app process was reported.';
+    `[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+      $entries = @(Get-ItemProperty -Path @(
+        'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*',
+        'HKLM:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*',
+        'HKLM:\\Software\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*'
+      ) -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -eq 'Tischtennis-Turnier' })
+      $settings = @(foreach ($entry in $entries) {
+        $root = if ($entry.PSPath -like '*HKEY_CURRENT_USER*') { 'HKCU:' } else { 'HKLM:' }
+        $branch = if ($entry.PSPath -like '*WOW6432Node*') { 'Software\\WOW6432Node' } else { 'Software' }
+        Get-ItemProperty -LiteralPath "$root\\$branch\\$($entry.PSChildName)" -ErrorAction SilentlyContinue |
+          Select-Object InstallLocation,PSPath
+      })
+      @{
+        Registrations = @($entries | Select-Object DisplayName,DisplayVersion,InstallLocation,UninstallString,PSPath)
+        InstallSettings = $settings
+        Processes = @(Get-Process -Name 'Tischtennis-Turnier' -ErrorAction SilentlyContinue | Select-Object Id,Path,SessionId)
+      } | ConvertTo-Json -Depth 4 -Compress`,
+  ], { encoding: 'utf8', windowsHide: true, timeout: 10_000, maxBuffer: 16384 });
+  if (result.error || result.status !== 0) {
+    return `Uninstall inspection failed: ${result.error?.message || result.stderr?.slice(-2000) || result.status}`;
+  }
+  return result.stdout?.trim().slice(-8000) || 'Uninstall inspection returned no output.';
 }
 
 async function reinstallInstalledApp() {
@@ -481,6 +501,7 @@ async function reinstallInstalledApp() {
   }
 
   console.log(`Uninstalling the app from ${installDirectory} while preserving tournament data.`);
+  console.log(`Windows registration before uninstall: ${describeInstalledAppUninstallState()}`);
   await uninstallInstalledFiles(uninstallerNames[0]);
   const uninstallDeadline = Date.now() + 30_000;
   while (Date.now() < uninstallDeadline) {
@@ -494,7 +515,7 @@ async function reinstallInstalledApp() {
   }
   try {
     await stat(executablePath);
-    throw new Error(`The Windows app executable remained after uninstalling. Remaining app processes: ${describeRemainingInstalledProcesses()}`);
+    throw new Error(`The Windows app executable remained after uninstalling. Windows uninstall state: ${describeInstalledAppUninstallState()}`);
   } catch (error) {
     if (error.code !== 'ENOENT') throw error;
   }
