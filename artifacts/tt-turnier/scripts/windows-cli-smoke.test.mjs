@@ -70,3 +70,75 @@ for (const args of [
     assert.throws(() => parse(args), /Pass --zip/);
   });
 }
+
+const uninstallHelpers = source.slice(source.indexOf('function runInstaller('), source.indexOf('async function reinstallInstalledApp('));
+
+for (const fail of [false, true]) {
+  test(`temporary NSIS uninstaller ${fail ? 'cleans up after failure' : 'waits for the explicit target without deleting account data'}`, async () => {
+    const calls = [];
+    const directory = 'C:\\old install with spaces';
+    const temporary = 'C:\\temporary tools\\uninstall helper';
+    const filename = 'Uninstall Tischtennis-Turnier.exe';
+    const context = vm.createContext({
+      installDirectory: directory, join: win32.join, resolve: win32.resolve, tmpdir: () => 'C:\\temporary tools',
+      mkdtemp: async () => temporary,
+      copyFile: async (from, to) => {
+        assert.equal(from, win32.join(directory, filename));
+        assert.equal(to, win32.join(temporary, filename));
+        calls.push('copy');
+      },
+      spawnSync: (file, args, options) => {
+        assert.equal(file, win32.join(temporary, filename));
+        assert.deepEqual(Array.from(args), ['/S', '/KEEP_APP_DATA', `_?=${directory}`]);
+        assert.equal(options.windowsVerbatimArguments, true);
+        assert.equal(options.argv0, `"${file}"`);
+        assert.equal(options.timeout, 120000);
+        calls.push('execute');
+        return { status: fail ? 5 : 0 };
+      },
+      rm: async (path, options) => {
+        assert.equal(path, temporary);
+        assert.equal(options.recursive, true);
+        assert.equal(options.maxRetries, 10);
+        calls.push('cleanup');
+      },
+    });
+    vm.runInContext(`${uninstallHelpers}\nglobalThis.uninstall = uninstallInstalledFiles;`, context);
+    if (fail) await assert.rejects(context.uninstall(filename), /exit code 5/);
+    else await context.uninstall(filename);
+    assert.deepEqual(calls, ['copy', 'execute', 'cleanup']);
+  });
+}
+
+test('ordinary installers retain standard Windows quoting and bounded execution', () => {
+  const context = vm.createContext({
+    spawnSync: (file, args, options) => {
+      assert.equal(file, installer);
+      assert.deepEqual(Array.from(args), ['/S', `/D=${firstDirectory}`]);
+      assert.equal(options.windowsVerbatimArguments, undefined);
+      assert.equal(options.argv0, undefined);
+      assert.equal(options.timeout, 120000);
+      return { status: 0 };
+    },
+  });
+  vm.runInContext(`${uninstallHelpers}\nglobalThis.run = runInstaller;`, context);
+  context.run(installer, ['/S', `/D=${firstDirectory}`], 'Installer failed');
+});
+
+test('a successful uninstaller exit cannot bypass the executable-removal check', async () => {
+  let clock = 0;
+  const context = vm.createContext({
+    console: { log() {} }, Date: { now: () => clock },
+    installDirectory: firstDirectory, executablePath: app,
+    readdir: async () => ['Uninstall Tischtennis-Turnier.exe'],
+    uninstallInstalledFiles: async () => {},
+    stat: async () => ({}),
+    delay: async (milliseconds) => { clock += milliseconds; },
+    describeRemainingInstalledProcesses: () => '[{"Id":123}]',
+    runInstaller: () => assert.fail('Must not reinstall while the old executable remains'),
+  });
+  const reinstall = source.slice(source.indexOf('async function reinstallInstalledApp('), source.indexOf('async function updateInstalledAppInPlace('));
+  vm.runInContext(`${reinstall}\nglobalThis.reinstall = reinstallInstalledApp;`, context);
+  await assert.rejects(context.reinstall(), /executable remained after uninstalling.*123/);
+  assert.equal(clock, 30000);
+});

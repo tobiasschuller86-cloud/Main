@@ -1,5 +1,5 @@
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { basename, dirname, join, resolve, win32 } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -429,12 +429,13 @@ async function terminateAppAbruptly(appProcess) {
   console.log('The app was terminated without a normal window-close path.');
 }
 
-function runInstaller(filePath, args, description) {
+function runInstaller(filePath, args, description, { windowsVerbatimArguments = false } = {}) {
   const result = spawnSync(filePath, args, {
     encoding: 'utf8',
     stdio: 'inherit',
     timeout: 120_000,
     windowsHide: true,
+    ...(windowsVerbatimArguments ? { windowsVerbatimArguments: true, argv0: `"${filePath}"` } : {}),
   });
   if (result.error) {
     throw new Error(`${description}: ${result.error.message}`);
@@ -442,6 +443,32 @@ function runInstaller(filePath, args, description) {
   if (result.status !== 0) {
     throw new Error(`${description} (exit code ${result.status}).`);
   }
+}
+
+async function uninstallInstalledFiles(uninstallerName) {
+  const temporaryDirectory = await mkdtemp(join(tmpdir(), 'tt-turnier-uninstaller-'));
+  const copiedUninstaller = join(temporaryDirectory, uninstallerName);
+  try {
+    await copyFile(join(installDirectory, uninstallerName), copiedUninstaller);
+    // NSIS's _?= must be the final, unquoted command-line tail, even with spaces.
+    // Running a temporary copy avoids NSIS's detached self-copy bootstrap.
+    runInstaller(
+      copiedUninstaller,
+      ['/S', '/KEEP_APP_DATA', `_?=${resolve(installDirectory)}`],
+      'The Windows app uninstaller failed',
+      { windowsVerbatimArguments: true },
+    );
+  } finally {
+    await rm(temporaryDirectory, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
+}
+
+function describeRemainingInstalledProcesses() {
+  const result = spawnSync('powershell.exe', [
+    '-NoProfile', '-NonInteractive', '-Command',
+    "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); Get-Process -Name 'Tischtennis-Turnier' -ErrorAction SilentlyContinue | Select-Object Id,Path,SessionId | ConvertTo-Json -Compress",
+  ], { encoding: 'utf8', windowsHide: true, timeout: 10_000, maxBuffer: 8192 });
+  return result.error?.message || result.stdout?.trim().slice(-4000) || 'No remaining app process was reported.';
 }
 
 async function reinstallInstalledApp() {
@@ -454,11 +481,7 @@ async function reinstallInstalledApp() {
   }
 
   console.log(`Uninstalling the app from ${installDirectory} while preserving tournament data.`);
-  runInstaller(
-    `${installDirectory}\\${uninstallerNames[0]}`,
-    ['/S'],
-    'The Windows app uninstaller failed',
-  );
+  await uninstallInstalledFiles(uninstallerNames[0]);
   const uninstallDeadline = Date.now() + 30_000;
   while (Date.now() < uninstallDeadline) {
     try {
@@ -471,7 +494,7 @@ async function reinstallInstalledApp() {
   }
   try {
     await stat(executablePath);
-    throw new Error('The Windows app executable remained after uninstalling.');
+    throw new Error(`The Windows app executable remained after uninstalling. Remaining app processes: ${describeRemainingInstalledProcesses()}`);
   } catch (error) {
     if (error.code !== 'ENOENT') throw error;
   }
