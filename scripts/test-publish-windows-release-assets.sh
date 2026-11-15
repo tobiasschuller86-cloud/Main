@@ -52,15 +52,15 @@ if [[ "$1" == api ]]; then
   endpoint="$1"
   shift
 
-  if [[ "$endpoint" == repos/*/releases/tags/* ]]; then
+  if [[ "$endpoint" == repos/test-owner/test-repo/releases/tags/v2.0.0 && "$method" == GET ]]; then
     printf '123\n'
     exit 0
   fi
-  if [[ "$endpoint" == */assets ]]; then
+  if [[ "$endpoint" == repos/test-owner/test-repo/releases/123/assets && "$method" == GET ]]; then
     cat "$assets_file"
     exit 0
   fi
-  if [[ "$endpoint" == */assets/* ]]; then
+  if [[ "$endpoint" =~ ^repos/test-owner/test-repo/releases/assets/[0-9]+$ ]]; then
     asset_id="${endpoint##*/}"
     if [[ "$method" == DELETE ]]; then
       name="$(awk -F '\t' -v id="$asset_id" '$1 == id { print $2 }' "$assets_file")"
@@ -88,6 +88,15 @@ echo "Unexpected mock gh invocation: $*" >&2
 exit 2
 MOCK_GH
 chmod +x "$mock_bin/gh"
+
+for method in GET DELETE; do
+  if GH_MOCK_STATE="$state_directory" "$mock_bin/gh" api --method "$method" \
+    repos/test-owner/test-repo/releases/123/assets/1 > /dev/null 2>&1; then
+    echo "The mock incorrectly accepted a nested release asset endpoint for $method." >&2
+    exit 1
+  fi
+done
+echo "Passed rejection of invalid nested GitHub asset endpoints."
 
 printf '10' > "$state_directory/next-id"
 : > "$state_directory/upload-count"

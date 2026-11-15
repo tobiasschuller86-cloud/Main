@@ -41,6 +41,7 @@ bash "$(dirname "$0")/verify-windows-release-assets.sh" \
 
 release_id="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$release_tag" --jq '.id')"
 assets_endpoint="repos/$GITHUB_REPOSITORY/releases/$release_id/assets"
+asset_endpoint="repos/$GITHUB_REPOSITORY/releases/assets"
 temporary_directory="$(mktemp -d)"
 backup_directory="$temporary_directory/previous"
 verification_directory="$temporary_directory/verified"
@@ -80,7 +81,7 @@ asset_id_for_name() {
 download_asset() {
   local asset_id="$1"
   local destination="$2"
-  gh api "$assets_endpoint/$asset_id" -H "Accept: application/octet-stream" > "$destination"
+  gh api "$asset_endpoint/$asset_id" -H "Accept: application/octet-stream" > "$destination"
 }
 
 rollback_release_assets() {
@@ -91,7 +92,7 @@ rollback_release_assets() {
     for row in "${RELEASE_ASSETS[@]}"; do
       IFS=$'\t' read -r asset_id asset_name <<< "$row"
       if is_recognized_windows_asset "$asset_name"; then
-        gh api --method DELETE "$assets_endpoint/$asset_id" || rollback_failed=true
+        gh api --method DELETE "$asset_endpoint/$asset_id" || rollback_failed=true
       fi
     done
   fi
@@ -177,7 +178,7 @@ for row in "${RELEASE_ASSETS[@]}"; do
     [[ "$asset_name" != "$installer_checksum_name" ]] &&
     [[ "$asset_name" != "$zip_checksum_name" ]]; then
     echo "Removing obsolete Windows release asset: $asset_name"
-    gh api --method DELETE "$assets_endpoint/$asset_id"
+    gh api --method DELETE "$asset_endpoint/$asset_id"
   fi
 done
 
