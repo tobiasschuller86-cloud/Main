@@ -52,6 +52,7 @@ test('rejects archives containing paths outside the selected update folder', win
       '-Command',
       [
         "Add-Type -AssemblyName System.IO.Compression",
+        "Add-Type -AssemblyName System.IO.Compression.FileSystem",
         "$archive = [System.IO.Compression.ZipFile]::Open($env:TT_TEST_ZIP, [System.IO.Compression.ZipArchiveMode]::Create)",
         "try { $entry = $archive.CreateEntry('..\\escaped.txt'); $writer = [IO.StreamWriter]::new($entry.Open()); $writer.Write('outside'); $writer.Dispose() } finally { $archive.Dispose() }",
       ].join('; '),

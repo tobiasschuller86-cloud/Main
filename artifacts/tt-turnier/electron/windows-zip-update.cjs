@@ -71,6 +71,7 @@ async function extractWindowsZip(zipPath, destinationPath) {
   const script = [
     "$ErrorActionPreference = 'Stop'",
     'Add-Type -AssemblyName System.IO.Compression',
+    'Add-Type -AssemblyName System.IO.Compression.FileSystem',
     '$archive = [System.IO.Compression.ZipFile]::OpenRead($env:TT_TURNIER_UPDATE_ZIP)',
     'try {',
     '  $root = [IO.Path]::GetFullPath($env:TT_TURNIER_UPDATE_DESTINATION).TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar',
