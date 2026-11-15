@@ -9,6 +9,19 @@ const helper = source.slice(
   source.indexOf('async function verifyReleaseNotesLink('),
 );
 
+test('temporary Windows account descriptions respect the 48-character system limit', async () => {
+  const workflow = await readFile(
+    new URL('../../../.github/workflows/windows-installer.yml', import.meta.url), 'utf8',
+  );
+  const accounts = [...workflow.matchAll(/New-LocalUser\b[^\r\n]+/g)];
+  assert.ok(accounts.length >= 4, 'Missing temporary smoke-test accounts');
+  for (const [command] of accounts) {
+    const description = command.match(/-Description "([^"]*)"/)?.[1];
+    assert.ok(description, 'Temporary accounts must have a recognizable description');
+    assert.ok(description.length <= 48, `Windows account description is too long: ${description}`);
+  }
+});
+
 function page({ ready = 'complete', navigation = true, overview = true, action = true, text = 'TURNIERÜBERSICHT' } = {}) {
   return {
     readyState: ready,

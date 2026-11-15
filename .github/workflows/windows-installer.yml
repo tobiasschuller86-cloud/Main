@@ -1019,7 +1019,7 @@ jobs:
           $accountName = "ttzip-$([guid]::NewGuid().ToString('N').Substring(0, 10))"
           $passwordText = [Convert]::ToBase64String([Security.Cryptography.RandomNumberGenerator]::GetBytes(32))
           $password = ConvertTo-SecureString $passwordText -AsPlainText -Force
-          $user = New-LocalUser -Name $accountName -Password $password -AccountNeverExpires -UserMayNotChangePassword -Description "Temporary standard-user Windows ZIP smoke test account"
+          $user = New-LocalUser -Name $accountName -Password $password -AccountNeverExpires -UserMayNotChangePassword -Description "Temporary ZIP smoke test account"
           $identity = "$env:COMPUTERNAME\$accountName"
           $workDirectory = Join-Path $env:RUNNER_TEMP "tt-turnier-standard-user-smoke"
           $secondAccountName = "ttzip2-$([guid]::NewGuid().ToString('N').Substring(0, 10))"
@@ -1034,8 +1034,8 @@ jobs:
           $unicodeWorkDirectory = Join-Path $env:RUNNER_TEMP "tt-turnier-unicode-profile-smoke"
 
           try {
-            $secondUser = New-LocalUser -Name $secondAccountName -Password $secondPassword -AccountNeverExpires -UserMayNotChangePassword -Description "Temporary second standard-user Windows ZIP isolation test account"
-            $unicodeUser = New-LocalUser -Name $unicodeAccountName -Password $unicodePassword -AccountNeverExpires -UserMayNotChangePassword -Description "Temporary standard-user Unicode-profile Windows ZIP smoke test account"
+            $secondUser = New-LocalUser -Name $secondAccountName -Password $secondPassword -AccountNeverExpires -UserMayNotChangePassword -Description "Temporary ZIP isolation test account"
+            $unicodeUser = New-LocalUser -Name $unicodeAccountName -Password $unicodePassword -AccountNeverExpires -UserMayNotChangePassword -Description "Temporary Unicode-profile ZIP test account"
             $adminGroup = Get-LocalGroup -SID "S-1-5-32-544"
             foreach ($standardUser in @($user, $secondUser, $unicodeUser)) {
               $adminMember = Get-LocalGroupMember -Group $adminGroup | Where-Object {
@@ -1280,7 +1280,7 @@ jobs:
           $profile = $null
 
           try {
-            $user = New-LocalUser -Name $accountName -Password $password -AccountNeverExpires -UserMayNotChangePassword -Description "Temporary Windows profile restart persistence smoke test account"
+            $user = New-LocalUser -Name $accountName -Password $password -AccountNeverExpires -UserMayNotChangePassword -Description "Temporary profile restart test account"
             Add-LocalGroupMember -Group (Get-LocalGroup -SID "S-1-5-32-545") -Member $user
             New-Item -ItemType Directory -Path $workDirectory -Force | Out-Null
             & icacls.exe $workDirectory /grant "${identity}:(OI)(CI)M"
