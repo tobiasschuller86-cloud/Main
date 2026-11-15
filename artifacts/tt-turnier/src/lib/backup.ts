@@ -419,27 +419,36 @@ export function parseTournamentBackup(raw: string): BackupResult {
   const registeredPairs = new Map(
     tournament.pairs.map((pair) => [JSON.stringify([pair.menPlayerId, pair.womenPlayerId].sort()), pair]),
   );
+  const registeredPlayerIds = new Set(
+    tournament.pairs.flatMap((pair) => [pair.menPlayerId, pair.womenPlayerId]),
+  );
+  const validGroupSide = (match: Match, side: Match['side1']): boolean => {
+    if (match.round === 1) {
+      const pair = registeredPairs.get(JSON.stringify([...side].sort()));
+      return Boolean(pair && pair.groupId === match.groupId);
+    }
+    const players = side.map((id) => playersById.get(id)!);
+    return side.every((id) => registeredPlayerIds.has(id))
+      && players.every((player) => player.groupId === match.groupId)
+      && players.filter((player) => player.category === 'men').length === 1
+      && players.filter((player) => player.category === 'women').length === 1;
+  };
   const mismatchedSide = tournament.matches.find((match) => {
     if (match.stage !== 'group') return false;
-    return [match.side1, match.side2].some((side) => {
-      if (!side) return false;
-      const pair = registeredPairs.get(JSON.stringify([...side].sort()));
-      return !pair || pair.groupId !== match.groupId;
-    });
+    return [match.side1, match.side2].some((side) => side !== null && !validGroupSide(match, side));
   });
   if (mismatchedSide) {
-    const sideIndex = [mismatchedSide.side1, mismatchedSide.side2].findIndex((side) => {
-      if (!side) return false;
-      const pair = registeredPairs.get(JSON.stringify([...side].sort()));
-      return !pair || pair.groupId !== mismatchedSide.groupId;
-    });
+    const sideIndex = [mismatchedSide.side1, mismatchedSide.side2]
+      .findIndex((side) => side !== null && !validGroupSide(mismatchedSide, side));
     const side = sideIndex === 0 ? mismatchedSide.side1 : mismatchedSide.side2;
     const registeredPair = side
       ? registeredPairs.get(JSON.stringify([...side].sort()))
       : undefined;
     return {
       success: false,
-      message: `${matchLocation(mismatchedSide, tournament)}, Seite ${sideIndex + 1} (${side ? matchSideNames(side, playersById) : 'Freilos'}) entspricht keinem angemeldeten Paar dieser Gruppe${registeredPair ? `; Paar „${registeredPair.id}“ ist Gruppe „${registeredPair.groupId}“ zugeordnet` : ''}.`,
+      message: mismatchedSide.round === 1
+        ? `${matchLocation(mismatchedSide, tournament)}, Seite ${sideIndex + 1} (${side ? matchSideNames(side, playersById) : 'Freilos'}) entspricht keinem angemeldeten Paar dieser Gruppe${registeredPair ? `; Paar „${registeredPair.id}“ ist Gruppe „${registeredPair.groupId}“ zugeordnet` : ''}.`
+        : `${matchLocation(mismatchedSide, tournament)}, Seite ${sideIndex + 1} (${side ? matchSideNames(side, playersById) : 'Freilos'}) ist kein gültiges Mixed-Paar aus angemeldeten Spielern dieser Gruppe.`,
     };
   }
   const invalidKnockoutSide = tournament.matches.find((match) =>

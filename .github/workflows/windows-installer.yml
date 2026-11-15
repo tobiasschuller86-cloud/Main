@@ -506,6 +506,8 @@ jobs:
         env:
           TT_TURNIER_RELEASE_BUILD: ${{ github.event_name == 'release' }}
         run: pnpm --filter @workspace/tt-turnier run build:desktop
+      - name: Test tournament backups and schedules
+        run: pnpm --filter @workspace/tt-turnier test
       - uses: actions/upload-artifact@v4
         with:
           name: tt-turnier-renderer

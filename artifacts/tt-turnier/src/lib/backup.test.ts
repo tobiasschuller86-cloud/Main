@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { blankTournament, type Tournament } from './tournament';
+import { blankTournament, createGroupSchedule, type Tournament } from './tournament';
 import {
   compareTournamentContents,
   createTournamentBackup,
@@ -1081,7 +1081,82 @@ test('all matches report missing player IDs across both sides without changing t
   assert.deepEqual(currentTournament, populatedTournament());
 });
 
-test('group match sides must match pairs registered in that group', () => {
+test('generated schedules retain rotating partners, scores, and identities after backup import', () => {
+  for (const rounds of [2, 3, 6]) {
+    const tournament = populatedTournament();
+    tournament.groupRounds = rounds;
+    let sequence = 0;
+    tournament.matches = createGroupSchedule(
+      tournament, tournament.pairs, tournament.players, tournament.groups,
+      () => `generated-${++sequence}`,
+    );
+    const originalResult = populatedTournament().matches[0];
+    Object.assign(tournament.matches[0], {
+      status: originalResult.status,
+      sets: originalResult.sets,
+      winnerSide: originalResult.winnerSide,
+    });
+    assert.ok(tournament.matches.some((match) => match.round > 1
+      && [match.side1, match.side2].some((side) => side !== null
+        && !tournament.pairs.some((pair) => side.includes(pair.menPlayerId) && side.includes(pair.womenPlayerId)))));
+    const currentTournament = blankTournament('2026-11-14');
+    let imported: Tournament | undefined;
+    const result = importTournamentBackup(
+      backupFor(tournament), currentTournament,
+      (replacement) => { imported = replacement; }, () => true,
+    );
+    assert.deepEqual(result, { success: true, imported: true });
+    assert.deepEqual(imported, tournament);
+    assert.deepEqual(currentTournament, blankTournament('2026-11-14'));
+  }
+});
+
+test('later rounds accept mixed partners in either side order', () => {
+  const tournament = populatedTournament();
+  tournament.matches = [{
+    ...tournament.matches[0], round: 2,
+    side1: ['w2', 'm1'], side2: ['w1', 'm2'],
+  }];
+  const result = parseTournamentBackup(backupFor(tournament));
+  assert.equal(result.success, true);
+  if (result.success) assert.deepEqual(result.tournament.matches, tournament.matches);
+});
+
+for (const kind of ['same category', 'different group', 'unregistered players'] as const) {
+  test(`later-round imports reject ${kind} without replacing current data`, () => {
+    const tournament = populatedTournament();
+    tournament.matches[0].round = 2;
+    if (kind === 'same category') {
+      tournament.matches[0].side1 = ['m1', 'm2'];
+      tournament.matches[0].side2 = ['w1', 'w2'];
+    } else {
+      const groupId = kind === 'different group' ? 'g2' : 'g1';
+      tournament.players.push(
+        { id: 'm3', name: 'Herr 3', category: 'men', groupId },
+        { id: 'w3', name: 'Dame 3', category: 'women', groupId },
+      );
+      if (kind === 'different group') {
+        tournament.groups.push({ id: 'g2', name: 'Andere Gruppe' });
+        tournament.pairs.push({ id: 'pair-3', menPlayerId: 'm3', womenPlayerId: 'w3', groupId });
+        tournament.matches[0].side1 = ['m1', 'w3'];
+      } else {
+        tournament.matches[0].side1 = ['m3', 'w3'];
+      }
+    }
+    const currentTournament = populatedTournament();
+    const unchanged = structuredClone(currentTournament);
+    const result = importTournamentBackup(
+      backupFor(tournament), currentTournament,
+      () => assert.fail('Invalid backup must not replace the tournament'),
+      () => assert.fail('Invalid backup must not ask for replacement confirmation'),
+    );
+    assert.equal(result.success, false);
+    if (!result.success) assert.match(result.message, /kein gültiges Mixed-Paar/);
+    assert.deepEqual(currentTournament, unchanged);
+  });
+}
+
+test('first-round group match sides must match pairs registered in that group', () => {
   const tournament = populatedTournament();
   const currentTournament = populatedTournament();
   const invalidTournament = {
