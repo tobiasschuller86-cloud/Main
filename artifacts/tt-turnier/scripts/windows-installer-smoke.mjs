@@ -1,6 +1,6 @@
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
-import { basename, dirname, join, resolve } from 'node:path';
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { basename, dirname, join, resolve, win32 } from 'node:path';
 import { tmpdir } from 'node:os';
 
 const zipUpdateSmoke = process.argv[2] === '--zip-update';
@@ -118,6 +118,32 @@ function verifyStandardUserContext() {
     );
   }
   console.log('The standalone ZIP smoke test is running with a non-administrator token.');
+}
+
+async function prepareStandardUserProfile() {
+  const result = spawnSync('powershell.exe', [
+    '-NoProfile', '-NonInteractive', '-Command',
+    "[Environment]::GetFolderPath('UserProfile') | ConvertTo-Json -Compress",
+  ], { encoding: 'utf8', windowsHide: true, timeout: 30_000, maxBuffer: 16_384 });
+  if (result.error || result.status !== 0) {
+    throw new Error(`Could not resolve the actual Windows account profile: ${result.error?.message || result.stderr}`);
+  }
+  const profile = JSON.parse(result.stdout.trim());
+  if (typeof profile !== 'string' || !win32.isAbsolute(profile) || !(await stat(profile)).isDirectory()) {
+    throw new Error('Windows did not return an existing absolute profile directory for the test account.');
+  }
+  // Start-Process -Credential loads the account but can inherit the caller's
+  // USERPROFILE and AppData variables. These accounts are fresh CI accounts
+  // with default Windows folders, not redirected production user profiles.
+  const roaming = win32.join(profile, 'AppData', 'Roaming');
+  const local = win32.join(profile, 'AppData', 'Local');
+  const temporary = win32.join(local, 'Temp');
+  for (const directory of [roaming, local, temporary]) await mkdir(directory, { recursive: true });
+  Object.assign(process.env, {
+    USERPROFILE: profile, APPDATA: roaming, LOCALAPPDATA: local,
+    TEMP: temporary, TMP: temporary, HOME: profile,
+  });
+  console.log('Prepared app-data and temporary folders in the actual standard Windows account profile.');
 }
 
 async function verifyUnicodeProfileContext() {
@@ -1215,7 +1241,10 @@ try {
       `Testing a standalone ZIP executable path ${executablePath.length} characters long (traditional Windows limit: 260).`,
     );
   }
-  if (standardUserSmoke) verifyStandardUserContext();
+  if (standardUserSmoke) {
+    verifyStandardUserContext();
+    await prepareStandardUserProfile();
+  }
   if (unicodeProfileSmoke) await verifyUnicodeProfileContext();
   appProcess = launchApp();
   appPage = await waitForAppPage(appProcess);

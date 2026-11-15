@@ -3,12 +3,60 @@ import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import vm from 'node:vm';
 import { EventEmitter } from 'node:events';
+import { win32 } from 'node:path';
 
 const source = await readFile(new URL('./windows-installer-smoke.mjs', import.meta.url), 'utf8');
 const helper = source.slice(
   source.indexOf('async function verifyInitialOverview('),
   source.indexOf('async function verifyReleaseNotesLink('),
 );
+
+for (const profile of ['C:\\Users\\temporary-one', 'C:\\Users\\temporary-two', 'C:\\Users\\tt-smök-日本語']) {
+  test(`standard-user startup replaces inherited paths with ${profile}`, async () => {
+    const created = [];
+    const env = { USERPROFILE: 'C:\\Users\\wrong-account', APPDATA: 'C:\\Users\\wrong-account\\AppData\\Roaming' };
+    const preparation = source.slice(source.indexOf('async function prepareStandardUserProfile('), source.indexOf('async function verifyUnicodeProfileContext('));
+    const context = vm.createContext({
+      win32, process: { env }, console: { log() {} },
+      spawnSync: (_file, _args, options) => {
+        assert.equal(options.timeout, 30_000);
+        return { status: 0, stdout: JSON.stringify(profile) };
+      },
+      stat: async (directory) => {
+        assert.equal(directory, profile);
+        return { isDirectory: () => true };
+      },
+      mkdir: async (directory, options) => {
+        assert.equal(options.recursive, true);
+        created.push(directory);
+      },
+    });
+    vm.runInContext(`${preparation}\nglobalThis.prepare = prepareStandardUserProfile;`, context);
+    await context.prepare();
+    assert.equal(env.USERPROFILE, profile);
+    assert.equal(env.APPDATA, win32.join(profile, 'AppData', 'Roaming'));
+    assert.equal(env.LOCALAPPDATA, win32.join(profile, 'AppData', 'Local'));
+    assert.equal(env.TEMP, win32.join(env.LOCALAPPDATA, 'Temp'));
+    assert.equal(env.TMP, env.TEMP);
+    assert.ok(created.every((directory) => directory.startsWith(`${profile}\\`)));
+  });
+}
+
+test('standard-user startup rejects an invalid profile instead of reusing inherited paths', async () => {
+  const preparation = source.slice(source.indexOf('async function prepareStandardUserProfile('), source.indexOf('async function verifyUnicodeProfileContext('));
+  for (const profile of ['', 'relative-profile', null]) {
+    const env = { USERPROFILE: 'original-profile' };
+    const context = vm.createContext({
+      win32, process: { env },
+      spawnSync: () => ({ status: 0, stdout: JSON.stringify(profile) }),
+      stat: () => assert.fail('Must reject invalid paths before accessing the filesystem'),
+      mkdir: () => assert.fail('Must not create directories for an invalid profile'),
+    });
+    vm.runInContext(`${preparation}\nglobalThis.prepare = prepareStandardUserProfile;`, context);
+    await assert.rejects(context.prepare(), /existing absolute profile directory/);
+    assert.equal(env.USERPROFILE, 'original-profile');
+  }
+});
 
 for (const [label, output, accepted] of [
   ['standard account', 'False\r\n', true],
