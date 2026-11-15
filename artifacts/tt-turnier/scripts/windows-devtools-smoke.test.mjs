@@ -6,6 +6,21 @@ import vm from 'node:vm';
 const source = await readFile(new URL('./windows-installer-smoke.mjs', import.meta.url), 'utf8');
 const helper = source.slice(source.indexOf('const devtoolsConnections ='), source.indexOf('async function evaluatePage('));
 
+test('page exceptions include a bounded description instead of hiding the failing input', async () => {
+  const context = vm.createContext({
+    sendDevtoolsCommand: async () => ({ exceptionDetails: {
+      exception: { description: `Missing smoke-test input: input-pair-man ${'x'.repeat(4000)}` },
+    } }),
+  });
+  const evaluate = source.slice(source.indexOf('async function evaluatePage('), source.indexOf('async function waitForAppPage('));
+  vm.runInContext(`${evaluate}\nglobalThis.evaluate = evaluatePage;`, context);
+  await assert.rejects(context.evaluate('synthetic-page', 'expression'), (error) => {
+    assert.match(error.message, /Missing smoke-test input: input-pair-man/);
+    assert.ok(error.message.length < 1600);
+    return true;
+  });
+});
+
 function harness() {
   const sockets = [];
   const timers = new Set();

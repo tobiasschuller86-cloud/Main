@@ -279,7 +279,9 @@ async function evaluatePage(webSocketUrl, expression) {
     awaitPromise: true,
   });
   if (response.exceptionDetails) {
-    throw new Error('Could not inspect or control the installed app page.');
+    const details = response.exceptionDetails;
+    const description = details.exception?.description || details.text || 'Unknown page exception';
+    throw new Error(`Could not inspect or control the installed app page: ${String(description).slice(0, 1500)}`);
   }
   return response.result.value;
 }
@@ -519,6 +521,12 @@ async function simulateInterruptedZipExtraction() {
 }
 
 async function fillInput(webSocketUrl, selector, value) {
+  await waitForPageValue(
+    webSocketUrl,
+    `Boolean(document.querySelector(${JSON.stringify(selector)}))`,
+    true,
+    `The installed app did not display the input ${selector}`,
+  );
   const expression = `(() => {
     const input = document.querySelector(${JSON.stringify(selector)});
     if (!input) throw new Error('Missing smoke-test input: ' + ${JSON.stringify(selector)});
@@ -590,7 +598,34 @@ async function verifyReleaseNotesLink(webSocketUrl) {
   console.log(`The installed app exposes ${expectedUrl} as an external release notes link.`);
 }
 
+async function prepareSmokeTournament(webSocketUrl) {
+  const hasExistingTournament = await evaluatePage(
+    webSocketUrl,
+    `(() => {
+      const saved = ${activeTournamentExpression()};
+      return Boolean(saved && (saved.name || saved.players?.length || saved.pairs?.length || saved.matches?.length));
+    })()`,
+  );
+  if (!hasExistingTournament) return;
+  await evaluatePage(webSocketUrl, "document.querySelector('[data-testid=\"button-new-tournament\"]')?.click()");
+  await fillInput(webSocketUrl, '[data-testid="input-new-tournament-name"]', savedTournamentName);
+  await evaluatePage(webSocketUrl, "document.querySelector('[data-testid=\"button-create-tournament\"]')?.click()");
+  await waitForPageValue(
+    webSocketUrl,
+    `(() => {
+      const saved = ${activeTournamentExpression()};
+      return saved?.name === ${JSON.stringify(savedTournamentName)}
+        && saved.players.length === 0 && saved.pairs.length === 0 && saved.matches.length === 0
+        && Boolean(document.querySelector('[data-testid="button-add-first-pair"]'));
+    })()`,
+    true,
+    'The installed app did not create an independent empty smoke tournament',
+  );
+  console.log('Created a separate smoke tournament without deleting the existing account data.');
+}
+
 async function createSmokeTournament(webSocketUrl) {
+  await prepareSmokeTournament(webSocketUrl);
   await evaluatePage(
     webSocketUrl,
     "document.querySelector('[data-testid=\"button-add-first-pair\"]')?.click()",

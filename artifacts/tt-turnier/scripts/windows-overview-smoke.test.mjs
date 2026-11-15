@@ -207,3 +207,73 @@ for (const [label, options] of [
     assert.equal(check.calls(), 60);
   });
 }
+
+function preparationHarness(initial, createWorks = true) {
+  const previous = structuredClone(initial);
+  const window = { active: initial };
+  let dialog = false;
+  let name;
+  let creations = 0;
+  const document = {
+    querySelector(selector) {
+      if (selector === '[data-testid="button-new-tournament"]') {
+        return { click() { dialog = true; } };
+      }
+      if (selector === '[data-testid="button-create-tournament"]') {
+        return { click() {
+          assert.equal(dialog, true);
+          if (createWorks) {
+            window.active = { name, players: [], pairs: [], matches: [] };
+            creations++;
+            dialog = false;
+          }
+        } };
+      }
+      if (selector === '[data-testid="button-add-first-pair"]') {
+        return !dialog && window.active.players.length === 0 ? {} : null;
+      }
+      throw new Error(`Unexpected test preparation selector: ${selector}`);
+    },
+  };
+  const evaluatePage = async (_url, expression) => vm.runInNewContext(expression, { window, document });
+  const context = vm.createContext({
+    console: { log() {} },
+    activeTournamentExpression: () => 'window.active',
+    savedTournamentName: 'Independent test tournament',
+    evaluatePage,
+    fillInput: async (_url, selector, value) => {
+      assert.equal(dialog, true);
+      assert.equal(selector, '[data-testid="input-new-tournament-name"]');
+      name = value;
+    },
+    waitForPageValue: async (url, expression, expected, description) => {
+      assert.equal(await evaluatePage(url, expression), expected, description);
+    },
+  });
+  const preparation = source.slice(source.indexOf('async function prepareSmokeTournament('), source.indexOf('async function createSmokeTournament('));
+  vm.runInContext(`${preparation}\nglobalThis.prepare = prepareSmokeTournament;`, context);
+  return { prepare: () => context.prepare('synthetic-page'), window, previous, creations: () => creations };
+}
+
+test('repeat smoke scenarios create a separate tournament and retain existing matches and players', async () => {
+  const existing = { name: 'Previous tournament', players: [{ id: 'player-one' }], pairs: [{ id: 'pair-one' }], matches: [{ sets: [[11, 7]] }] };
+  const h = preparationHarness(existing);
+  await h.prepare();
+  assert.equal(h.creations(), 1);
+  assert.deepEqual(existing, h.previous);
+  assert.deepEqual(h.window.active, { name: 'Independent test tournament', players: [], pairs: [], matches: [] });
+});
+
+test('a fresh smoke profile uses its existing empty workspace', async () => {
+  const empty = { name: '', players: [], pairs: [], matches: [] };
+  const h = preparationHarness(empty);
+  await h.prepare();
+  assert.equal(h.creations(), 0);
+  assert.equal(h.window.active, empty);
+});
+
+test('smoke preparation fails if the UI does not create an independent empty tournament', async () => {
+  const h = preparationHarness({ name: 'Existing', players: ['player'], pairs: ['pair'], matches: ['result'] }, false);
+  await assert.rejects(h.prepare(), /did not create an independent empty smoke tournament/);
+  assert.deepEqual(h.window.active, h.previous);
+});
