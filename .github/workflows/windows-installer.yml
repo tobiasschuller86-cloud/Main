@@ -514,12 +514,15 @@ jobs:
 
   test-certificate-expiry:
     if: github.event_name != 'schedule'
+    timeout-minutes: 10
     strategy:
       matrix:
         os: [windows-latest, ubuntu-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      - name: Check noninteractive test certificate safeguards
+        run: node scripts/test-windows-test-root-store.mjs
       - name: Test Windows signing certificate usage and validity checks
         shell: pwsh
         run: ./scripts/test-windows-signing-certificate.ps1
@@ -568,6 +571,7 @@ jobs:
 
   test-partial-packaging-cleanup:
     if: github.event_name != 'schedule'
+    timeout-minutes: 10
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -626,6 +630,7 @@ jobs:
 
   test-signed-windows-packaging:
     if: github.event_name != 'schedule'
+    timeout-minutes: 30
     needs: build-renderer
     runs-on: windows-latest
     steps:

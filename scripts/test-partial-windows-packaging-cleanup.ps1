@@ -1,4 +1,5 @@
 $ErrorActionPreference = "Stop"
+. "$PSScriptRoot/windows-test-root-store.ps1"
 
 function Assert-True {
   param(
@@ -212,10 +213,11 @@ try {
   )
   $testCertificateBase64 = [Convert]::ToBase64String($testCertificateBytes)
 
-  $rootStore = [System.Security.Cryptography.X509Certificates.X509Store]::new("Root", "CurrentUser")
-  $rootStore.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
+  $rootStore = Open-WindowsTestRootStore
+  Write-Host "Installing temporary root certificate for partial packaging cleanup test."
   $rootStore.Add($testCertificate)
   $rootCertificateInstalled = $true
+  Write-Host "Temporary root installed; preparing signed cleanup scenario."
   $publisherStore = [System.Security.Cryptography.X509Certificates.X509Store]::new("TrustedPublisher", "CurrentUser")
   $publisherStore.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
   $publisherStore.Add($testCertificate)

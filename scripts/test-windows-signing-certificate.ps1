@@ -1,5 +1,6 @@
 $ErrorActionPreference = "Stop"
 . "$PSScriptRoot/windows-signing-certificate.ps1"
+. "$PSScriptRoot/windows-test-root-store.ps1"
 
 function Assert-True {
   param(
@@ -164,12 +165,10 @@ function Invoke-CertificateCheck {
       $trustedCertificate = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new(
         $certificateForTrust.RawData
       )
-      $trustStore = [System.Security.Cryptography.X509Certificates.X509Store]::new(
-        [System.Security.Cryptography.X509Certificates.StoreName]::Root,
-        [System.Security.Cryptography.X509Certificates.StoreLocation]::CurrentUser
-      )
-      $trustStore.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
+      $trustStore = Open-WindowsTestRootStore
+      Write-Host "Installing temporary certificate for certificate validation test."
       $trustStore.Add($trustedCertificate)
+      Write-Host "Temporary certificate installed; validating certificate."
     }
 
     $capturedOutput = @(Get-WindowsSigningCertificateInfo `
@@ -219,13 +218,11 @@ function Assert-NonUtcBoundaryCheck {
     [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::EphemeralKeySet
   )
   $trustedCertificate = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($certificate.RawData)
-  $trustStore = [System.Security.Cryptography.X509Certificates.X509Store]::new(
-    [System.Security.Cryptography.X509Certificates.StoreName]::Root,
-    [System.Security.Cryptography.X509Certificates.StoreLocation]::CurrentUser
-  )
+  $trustStore = Open-WindowsTestRootStore
   try {
-    $trustStore.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
+    Write-Host "Installing temporary certificate for time-zone boundary test."
     $trustStore.Add($trustedCertificate)
+    Write-Host "Temporary certificate installed; starting time-zone boundary test."
     $processInfo = [System.Diagnostics.ProcessStartInfo]::new([Environment]::ProcessPath)
     $processInfo.UseShellExecute = $false
     $processInfo.RedirectStandardOutput = $true
@@ -236,6 +233,7 @@ function Assert-NonUtcBoundaryCheck {
     $processInfo.Environment["WINDOWS_SIGNING_TEST_NOW"] = $NowUtc.ToString("o")
     $processInfo.Environment["WINDOWS_SIGNING_TEST_SCRIPT"] = "$PSScriptRoot/windows-signing-certificate.ps1"
     $processInfo.ArgumentList.Add("-NoProfile")
+    $processInfo.ArgumentList.Add("-NonInteractive")
     $processInfo.ArgumentList.Add("-Command")
     $processInfo.ArgumentList.Add(@'
 . $env:WINDOWS_SIGNING_TEST_SCRIPT
@@ -247,14 +245,23 @@ Write-Output "non-UTC exact-start boundary passed"
 '@)
 
     $process = [System.Diagnostics.Process]::Start($processInfo)
-    $stdout = $process.StandardOutput.ReadToEnd()
-    $stderr = $process.StandardError.ReadToEnd()
-    $process.WaitForExit()
+    try {
+      $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+      $stderrTask = $process.StandardError.ReadToEndAsync()
+      if (-not $process.WaitForExit(60000)) {
+        $process.Kill($true)
+        throw "The certificate time-zone boundary test exceeded its 60-second limit."
+      }
+      $stdout = $stdoutTask.GetAwaiter().GetResult()
+      $stderr = $stderrTask.GetAwaiter().GetResult()
+      $exitCode = $process.ExitCode
+    } finally {
+      $process.Dispose()
+    }
     Assert-NoSecretOutput -Output "$stdout`n$stderr" -CertificateBase64 $CertificateBase64 -Password $Password
     Assert-True (
-      $process.ExitCode -eq 0 -and $stdout -match "non-UTC exact-start boundary passed"
+      $exitCode -eq 0 -and $stdout -match "non-UTC exact-start boundary passed"
     ) "Certificate validity failed at the exact UTC start time in a non-UTC process."
-    $process.Dispose()
   } finally {
     $trustStore.Remove($trustedCertificate)
     $trustStore.Close()

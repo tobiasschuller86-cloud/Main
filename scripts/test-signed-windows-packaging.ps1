@@ -1,4 +1,5 @@
 $ErrorActionPreference = "Stop"
+. "$PSScriptRoot/windows-test-root-store.ps1"
 
 function Assert-True {
   param(
@@ -90,10 +91,11 @@ try {
   )
   $certificateBase64 = [Convert]::ToBase64String($certificateBytes)
 
-  $rootStore = [System.Security.Cryptography.X509Certificates.X509Store]::new("Root", "CurrentUser")
-  $rootStore.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
+  $rootStore = Open-WindowsTestRootStore
+  Write-Host "Installing temporary root certificate for signed packaging test."
   $rootStore.Add($certificate)
   $rootCertificateInstalled = $true
+  Write-Host "Temporary root installed; preparing signed Windows packaging."
 
   $publisherStore = [System.Security.Cryptography.X509Certificates.X509Store]::new("TrustedPublisher", "CurrentUser")
   $publisherStore.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
@@ -104,6 +106,7 @@ try {
   $env:WINDOWS_CERTIFICATE_PASSWORD = $certificatePassword
 
   Set-Location -LiteralPath $workspaceRoot
+  Write-Host "Starting signed Windows packaging and timestamp verification."
   $packageOutput = @()
   $packageInvocationError = $null
   try {
@@ -176,6 +179,7 @@ try {
 
   $env:WINDOWS_CERTIFICATE_BASE64 = $certificateBase64
   $env:WINDOWS_CERTIFICATE_PASSWORD = $certificatePassword
+  Write-Host "Starting same-version signed Windows rebuild."
   $rebuildOutput = @()
   $rebuildInvocationError = $null
   try {
