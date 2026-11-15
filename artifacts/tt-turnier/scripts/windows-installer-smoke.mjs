@@ -225,6 +225,7 @@ function sendDevtoolsCommand(webSocketUrl, method, params = {}) {
     };
     devtoolsConnections.set(webSocketUrl, current);
     socket.addEventListener('open', () => {
+      current.send({ command: { id: 0, method: 'Page.enable' } });
       for (const request of current.pending.values()) current.send(request);
     });
     socket.addEventListener('message', (event) => {
@@ -233,6 +234,10 @@ function sendDevtoolsCommand(webSocketUrl, method, params = {}) {
         message = JSON.parse(event.data);
       } catch {
         current.fail(new Error('The installed app sent an invalid debugging response.'));
+        return;
+      }
+      if (message.method === 'Page.javascriptDialogOpening') {
+        current.fail(new Error(`Unexpected ${message.params?.type} dialog in the Windows smoke test: ${message.params?.message}`));
         return;
       }
       const request = current.pending.get(message.id);
@@ -259,7 +264,7 @@ function sendDevtoolsCommand(webSocketUrl, method, params = {}) {
     const request = {
       command, resolve, reject,
       timeout: setTimeout(() => {
-        connection.fail(new Error('Timed out while checking the installed app screen.'));
+        connection.fail(new Error(`Timed out while checking the installed app screen during ${method}.`));
       }, 10_000),
     };
     connection.pending.set(command.id, request);

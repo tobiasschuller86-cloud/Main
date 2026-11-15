@@ -42,7 +42,8 @@ test('document, file-input lookup, and file selection keep one debugging session
   await files;
   assert.equal(h.sockets.length, 1);
   assert.equal(socket.readyState, 1);
-  assert.deepEqual(socket.sent.map((command) => command.id), [1, 2, 3]);
+  assert.deepEqual(socket.sent.map((command) => command.id), [0, 1, 2, 3]);
+  assert.equal(socket.sent[0].method, 'Page.enable');
   assert.equal(h.timers.size, 0);
   socket.close();
 });
@@ -94,4 +95,18 @@ test('a request timeout closes the session and rejects all outstanding work', as
   await Promise.all([first, second]);
   assert.equal(h.sockets[0].readyState, 3);
   assert.equal(h.timers.size, 0);
+});
+
+test('unexpected import alerts report their message rather than hanging or accepting the dialog', async () => {
+  const h = harness();
+  const failed = assert.rejects(h.send('Runtime.evaluate'), /Unexpected alert.*Invalid backup/);
+  const socket = h.sockets[0];
+  socket.open();
+  socket.emit('message', { data: JSON.stringify({
+    method: 'Page.javascriptDialogOpening',
+    params: { type: 'alert', message: 'Invalid backup' },
+  }) });
+  await failed;
+  assert.equal(h.timers.size, 0);
+  assert.ok(!socket.sent.some((command) => command.method === 'Page.handleJavaScriptDialog'));
 });
