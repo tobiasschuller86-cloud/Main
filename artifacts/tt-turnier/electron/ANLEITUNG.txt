@@ -1,0 +1,54 @@
+Tischtennis-Turnier für Windows
+
+INSTALLATION
+1. Starte die Setup-Datei Tischtennis-Turnier-<Version>-x64.exe.
+2. Folge dem Installationsdialog und wähle bei Bedarf einen Installationsordner.
+3. Starte Tischtennis-Turnier über das Startmenü oder die Desktop-Verknüpfung.
+
+UPDATE
+Starte die neue Setup-Datei und installiere die App erneut. Eine vorherige
+Version muss nicht deinstalliert werden. Turnierdaten im Windows-Benutzerprofil
+bleiben bei Neustarts, Updates und auch nach einer Deinstallation erhalten.
+Jedes Windows-Benutzerkonto hat eigene Turnierdaten; andere Konten sehen diese
+Daten nicht.
+
+PORTABLE VERSION
+Falls du stattdessen die ZIP-Version verwendest, entpacke sie vollständig in
+einen Ordner und starte Tischtennis-Turnier.exe.
+Du kannst den ZIP-Ordner bei geschlossenem Programm durch eine neue Version
+ersetzen. Turnierdaten bleiben dabei im Windows-Benutzerprofil erhalten.
+
+ZIP-VERSION AKTUALISIEREN
+1. Lade die ZIP-Datei und die dazugehörige Datei mit der Endung .zip.sha256
+   herunter. Speichere beide Dateien unverändert im selben Ordner.
+2. Prüfe den SHA-256-Hash in PowerShell:
+   Get-FileHash -Algorithm SHA256 .\Tischtennis-Turnier-<Version>-x64-<signed-oder-unsigned>.zip
+   Vergleiche den angezeigten Hash exakt mit dem 64-stelligen Hash in der
+   passenden .zip.sha256-Datei. Bei einer Abweichung die ZIP nicht verwenden.
+   Ersetze die Platzhalter im Befehl durch den ZIP-Dateinamen.
+3. Öffne in der App Einstellungen und wähle „Windows-ZIP auswählen und starten“.
+   Wähle die ZIP-Datei und danach einen Zielordner außerhalb des bisherigen
+   App-Ordners. Die App prüft Prüfsumme, Dateiinhalte und Version, entpackt in
+   einen neuen Ordner und startet die neue Version. Die bisherige App wird
+   nicht überschrieben.
+4. Prüfe in der neuen Version, ob deine Turnierdaten vorhanden sind. Erst wenn
+   alles funktioniert, kannst du den alten App-Ordner löschen. Die Daten bleiben
+   unabhängig von beiden App-Ordnern im Windows-Benutzerprofil gespeichert.
+
+Wird das Entpacken unterbrochen, die ZIP-Prüfung abgelehnt oder startet die
+neue Version nicht, bleibt die bisherige App verfügbar. Lösche nur den neu
+angelegten oder unvollständigen Versionsordner und starte die bisherige App.
+Lösche nicht den Datenordner im Windows-Benutzerprofil.
+
+Die App läuft lokal auf diesem Windows-Gerät und benötigt weder Replit noch
+eine Internetverbindung. Für Updateprüfung und Downloads wird Internet benötigt.
+Die Turnierdaten werden im Windows-Benutzerprofil der App gespeichert.
+
+DATEN AUS DEM BROWSER ÜBERNEHMEN
+1. Öffne im bisherigen Browserprogramm Einstellungen > Datensicherung > Sicherung herunterladen.
+2. Öffne die Desktop-App und wähle Einstellungen > Datensicherung > Sicherung einspielen.
+3. Wähle die heruntergeladene JSON-Datei.
+
+SICHERUNG
+Lade regelmäßig eine JSON-Sicherung herunter und speichere sie zusätzlich auf einem anderen Datenträger.
+Die App synchronisiert Daten nicht automatisch mit anderen Geräten.

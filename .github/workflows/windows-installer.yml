@@ -1,0 +1,1360 @@
+name: Windows desktop builds
+
+on:
+  pull_request:
+  release:
+    types:
+      - published
+  workflow_dispatch:
+  # Check weekly; the shared certificate check validates signing usage and dates, and notifies on expiry or within 30 days.
+  schedule:
+    - cron: "17 9 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  scheduled-certificate-expiry-check:
+    if: github.event_name == 'schedule'
+    permissions:
+      contents: read
+      issues: write
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check configured Windows signing certificate validity
+        id: check-certificate
+        env:
+          WINDOWS_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          . ./scripts/windows-signing-certificate.ps1
+
+          $configurationStatus = Get-WindowsSigningConfigurationStatus `
+            -CertificateBase64 $env:WINDOWS_CERTIFICATE_BASE64 `
+            -Password $env:WINDOWS_CERTIFICATE_PASSWORD
+
+          if (-not $configurationStatus.IsConfigured) {
+            Write-Host "Windows signing is not configured; certificate validity check skipped."
+            "signing-configured=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+            "missing-secrets=$($configurationStatus.MissingSecrets -join ',')" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+            "has-certificate=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+            Remove-Item Env:WINDOWS_CERTIFICATE_BASE64 -ErrorAction SilentlyContinue
+            Remove-Item Env:WINDOWS_CERTIFICATE_PASSWORD -ErrorAction SilentlyContinue
+          } else {
+            "signing-configured=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+            "missing-secrets=" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+            $certificateInfo = $null
+            try {
+              $certificateInfo = Get-WindowsSigningCertificateInfo `
+                -CertificateBase64 $env:WINDOWS_CERTIFICATE_BASE64 `
+                -Password $env:WINDOWS_CERTIFICATE_PASSWORD `
+                -AllowExpired
+
+                if ($certificateInfo.ExpiresAt -isnot [datetime]) {
+                  throw "The Windows signing certificate expiry date is invalid."
+                }
+                $expiryDate = $certificateInfo.ExpiresAt.ToString(
+                  'yyyy-MM-dd',
+                  [System.Globalization.CultureInfo]::InvariantCulture
+                )
+                $parsedExpiry = [datetime]::MinValue
+                $validExpiry = [datetime]::TryParseExact(
+                  $expiryDate,
+                  'yyyy-MM-dd',
+                  [System.Globalization.CultureInfo]::InvariantCulture,
+                  [System.Globalization.DateTimeStyles]::AssumeUniversal,
+                  [ref]$parsedExpiry
+                )
+                if (
+                  -not $validExpiry -or
+                  $parsedExpiry.ToString('yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture) -ne $expiryDate
+                ) {
+                  "failure-reason=invalid-expiry" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+                  throw "The Windows signing certificate expiry date is invalid."
+                }
+              Write-Host "Windows signing certificate validity check completed."
+              "has-certificate=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+                "expires-at=$expiryDate" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+                "expiry-data-valid=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+              "certificate-expired=$($certificateInfo.IsExpired.ToString().ToLowerInvariant())" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+              "renewal-needed=$($certificateInfo.RenewalNeeded.ToString().ToLowerInvariant())" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+            } finally {
+              if ($certificateInfo -and $certificateInfo.CertificateBytes) {
+                [Array]::Clear($certificateInfo.CertificateBytes, 0, $certificateInfo.CertificateBytes.Length)
+              }
+              Remove-Item Env:WINDOWS_CERTIFICATE_BASE64 -ErrorAction SilentlyContinue
+              Remove-Item Env:WINDOWS_CERTIFICATE_PASSWORD -ErrorAction SilentlyContinue
+            }
+          }
+      - name: Notify maintainers when Windows signing is not configured
+        if: always() && (steps.check-certificate.outputs.signing-configured == 'true' || steps.check-certificate.outputs.signing-configured == 'false')
+        uses: actions/github-script@v7
+        env:
+          WINDOWS_SIGNING_CONFIGURED: ${{ steps.check-certificate.outputs.signing-configured }}
+          WINDOWS_SIGNING_MISSING_SECRETS: ${{ steps.check-certificate.outputs.missing-secrets }}
+          # Set this repository variable to @username or @org/team; defaults to the repository owner.
+          WINDOWS_SIGNING_MAINTAINERS: ${{ vars.WINDOWS_SIGNING_MAINTAINERS }}
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const title = "Windows signing is not configured";
+            const runUrl = `${process.env.GITHUB_SERVER_URL}/${owner}/${repo}/actions/runs/${process.env.GITHUB_RUN_ID}`;
+            const issues = await github.paginate(github.rest.issues.listForRepo, {
+              owner,
+              repo,
+              state: "all",
+              per_page: 100,
+            });
+            const alerts = issues.filter((issue) =>
+              !issue.pull_request && issue.title === title
+            );
+            const openAlerts = alerts.filter((issue) => issue.state === "open");
+
+            if (process.env.WINDOWS_SIGNING_CONFIGURED === "true") {
+              for (const issue of openAlerts) {
+                await github.rest.issues.update({
+                  owner,
+                  repo,
+                  issue_number: issue.number,
+                  state: "closed",
+                });
+              }
+              return;
+            }
+
+            const maintainerMention =
+              process.env.WINDOWS_SIGNING_MAINTAINERS?.trim() || `@${owner}`;
+            const missingSecrets = process.env.WINDOWS_SIGNING_MISSING_SECRETS
+              .split(",")
+              .filter(Boolean);
+            const body = [
+              `${maintainerMention} Windows code signing is not configured.`,
+              "",
+              `Missing repository secret(s): ${missingSecrets.map((name) => `\`${name}\``).join(", ")}.`,
+              "",
+              "Add the missing secret(s) to enable signed Windows releases. The secret values are not included in this alert.",
+              "",
+              `[View the scheduled signing check](${runUrl})`,
+            ].join("\n");
+            const alert = openAlerts[0] || alerts[0];
+
+            if (alert) {
+              for (const duplicate of alerts.filter((issue) => issue.number !== alert.number && issue.state === "open")) {
+                await github.rest.issues.update({
+                  owner,
+                  repo,
+                  issue_number: duplicate.number,
+                  state: "closed",
+                });
+              }
+              await github.rest.issues.update({
+                owner,
+                repo,
+                issue_number: alert.number,
+                body,
+                ...(alert.state === "closed" ? { state: "open" } : {}),
+              });
+              core.info("Updated the existing Windows signing configuration alert.");
+              return;
+            }
+
+            await github.rest.issues.create({ owner, repo, title, body });
+      - name: Report failures in the scheduled Windows signing check
+        if: always()
+        uses: actions/github-script@v7
+        env:
+          WINDOWS_SIGNING_CHECK_OUTCOME: ${{ steps.check-certificate.outcome }}
+          WINDOWS_SIGNING_FAILURE_REASON: ${{ steps.check-certificate.outputs.failure-reason }}
+          WINDOWS_SIGNING_CONFIGURED: ${{ steps.check-certificate.outputs.signing-configured }}
+          WINDOWS_SIGNING_HAS_CERTIFICATE: ${{ steps.check-certificate.outputs.has-certificate }}
+          WINDOWS_SIGNING_EXPIRES_AT: ${{ steps.check-certificate.outputs.expires-at }}
+          WINDOWS_SIGNING_MAINTAINERS: ${{ vars.WINDOWS_SIGNING_MAINTAINERS }}
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const title = "Windows signing certificate check failed";
+            const runUrl = `${process.env.GITHUB_SERVER_URL}/${owner}/${repo}/actions/runs/${process.env.GITHUB_RUN_ID}`;
+            const expiresAt = process.env.WINDOWS_SIGNING_EXPIRES_AT || "";
+            const parsedExpiry = /^\d{4}-\d{2}-\d{2}$/.test(expiresAt)
+              ? new Date(`${expiresAt}T00:00:00.000Z`)
+              : null;
+            const expiryIsValid = Boolean(
+              parsedExpiry &&
+              !Number.isNaN(parsedExpiry.getTime()) &&
+              parsedExpiry.toISOString().slice(0, 10) === expiresAt
+            );
+            const checkFailed =
+              process.env.WINDOWS_SIGNING_CHECK_OUTCOME === "failure";
+            const configured =
+              process.env.WINDOWS_SIGNING_CONFIGURED === "true";
+            const certificateFound =
+              process.env.WINDOWS_SIGNING_HAS_CERTIFICATE === "true";
+            const invalidExpiry = configured && (!certificateFound || !expiryIsValid);
+            const failed = checkFailed || invalidExpiry;
+            const issues = await github.paginate(github.rest.issues.listForRepo, {
+              owner,
+              repo,
+              state: "all",
+              per_page: 100,
+            });
+            const alerts = issues.filter(
+              (issue) => !issue.pull_request && issue.title === title
+            );
+            const openAlerts = alerts.filter((issue) => issue.state === "open");
+
+            // A missing configuration has its own alert. Keep a previous check
+            // failure open until an actual certificate check succeeds.
+            if (!failed && (!configured || !certificateFound || !expiryIsValid)) return;
+
+            if (!failed) {
+              for (const issue of openAlerts) {
+                await github.rest.issues.update({
+                  owner,
+                  repo,
+                  issue_number: issue.number,
+                  state: "closed",
+                });
+              }
+              return;
+            }
+
+            const maintainerMention =
+              process.env.WINDOWS_SIGNING_MAINTAINERS?.trim() || `@${owner}`;
+            const invalidExpiryFailure =
+              process.env.WINDOWS_SIGNING_FAILURE_REASON === "invalid-expiry" ||
+              (invalidExpiry && !checkFailed);
+            const detail = invalidExpiryFailure
+              ? "The scheduled check returned missing or invalid certificate expiry data."
+              : "The scheduled check could not read or validate the configured signing credentials, or another validation step failed. Review the run for the specific reason.";
+            const body = [
+              `${maintainerMention} The scheduled Windows signing certificate check failed.`,
+              "",
+              detail,
+              "Review the run for details. Certificate and password values are never included in this alert.",
+              "",
+              `[View the failed scheduled signing check](${runUrl})`,
+            ].join("\n");
+            const alert = openAlerts[0] || alerts[0];
+
+            if (alert) {
+              for (const duplicate of openAlerts.filter(
+                (issue) => issue.number !== alert.number
+              )) {
+                await github.rest.issues.update({
+                  owner,
+                  repo,
+                  issue_number: duplicate.number,
+                  state: "closed",
+                });
+              }
+              await github.rest.issues.update({
+                owner,
+                repo,
+                issue_number: alert.number,
+                body,
+                ...(alert.state === "closed" ? { state: "open" } : {}),
+              });
+              return;
+            }
+
+            await github.rest.issues.create({ owner, repo, title, body });
+      - name: Notify maintainers about certificate renewal
+        if: success() && (steps.check-certificate.outputs.signing-configured == 'false' || (steps.check-certificate.outputs.signing-configured == 'true' && steps.check-certificate.outputs.expiry-data-valid == 'true'))
+        uses: actions/github-script@v7
+        env:
+          WINDOWS_SIGNING_CONFIGURED: ${{ steps.check-certificate.outputs.signing-configured }}
+          WINDOWS_SIGNING_EXPIRES_AT: ${{ steps.check-certificate.outputs.expires-at }}
+          WINDOWS_SIGNING_CERTIFICATE_EXPIRED: ${{ steps.check-certificate.outputs.certificate-expired }}
+          WINDOWS_SIGNING_RENEWAL_NEEDED: ${{ steps.check-certificate.outputs.renewal-needed }}
+          # Set this repository variable to @username or @org/team; defaults to the repository owner.
+          WINDOWS_SIGNING_MAINTAINERS: ${{ vars.WINDOWS_SIGNING_MAINTAINERS }}
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const expiresAt = process.env.WINDOWS_SIGNING_EXPIRES_AT;
+            const renewalNeeded = process.env.WINDOWS_SIGNING_RENEWAL_NEEDED === "true";
+            const titlePrefix = "Windows signing certificate renewal:";
+            const title = `${titlePrefix} ${expiresAt} UTC`;
+            const issues = await github.paginate(github.rest.issues.listForRepo, {
+              owner,
+              repo,
+              state: "all",
+              per_page: 100,
+            });
+            const reminders = issues.filter((issue) =>
+              !issue.pull_request && issue.title.startsWith(titlePrefix)
+            );
+            const matchingReminders = reminders.filter((issue) => issue.title === title);
+            const matchingReminder =
+              matchingReminders.find((issue) => issue.state === "open") || matchingReminders[0];
+            const openReminders = reminders.filter((issue) => issue.state === "open");
+            if (process.env.WINDOWS_SIGNING_CONFIGURED !== "true") {
+              for (const issue of openReminders) {
+                await github.rest.issues.update({
+                  owner,
+                  repo,
+                  issue_number: issue.number,
+                  state: "closed",
+                });
+              }
+              return;
+            }
+            const maintainerMention =
+              process.env.WINDOWS_SIGNING_MAINTAINERS?.trim() || `@${owner}`;
+            const runUrl = `${process.env.GITHUB_SERVER_URL}/${owner}/${repo}/actions/runs/${process.env.GITHUB_RUN_ID}`;
+            const reminderBody = [
+              `${maintainerMention} The configured Windows publisher certificate expires on **${expiresAt} UTC**.`,
+              "",
+              "Please renew the certificate before the next Windows release.",
+              "",
+              `[View the scheduled certificate check](${runUrl})`,
+            ].join("\n");
+
+            if (process.env.WINDOWS_SIGNING_CERTIFICATE_EXPIRED === "true") {
+              for (const issue of openReminders) {
+                await github.rest.issues.update({
+                  owner,
+                  repo,
+                  issue_number: issue.number,
+                  state: "closed",
+                });
+              }
+              return;
+            }
+
+            if (!renewalNeeded) {
+              for (const issue of openReminders) {
+                await github.rest.issues.update({
+                  owner,
+                  repo,
+                  issue_number: issue.number,
+                  state: "closed",
+                });
+              }
+              return;
+            }
+
+            for (const issue of openReminders.filter((openIssue) => openIssue.title !== title)) {
+              await github.rest.issues.update({
+                owner,
+                repo,
+                issue_number: issue.number,
+                state: "closed",
+              });
+            }
+
+            if (matchingReminder) {
+              for (const duplicate of matchingReminders.filter(
+                (issue) => issue.number !== matchingReminder.number && issue.state === "open"
+              )) {
+                await github.rest.issues.update({
+                  owner,
+                  repo,
+                  issue_number: duplicate.number,
+                  state: "closed",
+                });
+              }
+              await github.rest.issues.update({
+                owner,
+                repo,
+                issue_number: matchingReminder.number,
+                body: reminderBody,
+                ...(matchingReminder.state === "closed" ? { state: "open" } : {}),
+              });
+              if (matchingReminder.state === "closed") {
+                core.info(`Reopened the renewal reminder for ${expiresAt} UTC.`);
+              }
+              else {
+                core.info(`Updated the renewal reminder for ${expiresAt} UTC.`);
+              }
+              return;
+            }
+
+            await github.rest.issues.create({
+              owner,
+              repo,
+              title,
+              body: reminderBody,
+            });
+
+      - name: Notify maintainers when the Windows signing certificate has expired
+        if: success() && (steps.check-certificate.outputs.expiry-data-valid == 'true' || steps.check-certificate.outputs.signing-configured == 'false')
+        uses: actions/github-script@v7
+        env:
+          WINDOWS_SIGNING_CONFIGURED: ${{ steps.check-certificate.outputs.signing-configured }}
+          WINDOWS_SIGNING_CERTIFICATE_EXPIRED: ${{ steps.check-certificate.outputs.certificate-expired }}
+          WINDOWS_SIGNING_EXPIRES_AT: ${{ steps.check-certificate.outputs.expires-at }}
+          # Set this repository variable to @username or @org/team; defaults to the repository owner.
+          WINDOWS_SIGNING_MAINTAINERS: ${{ vars.WINDOWS_SIGNING_MAINTAINERS }}
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const titlePrefix = "Windows signing certificate expired:";
+            const configured = process.env.WINDOWS_SIGNING_CONFIGURED === "true";
+            const expired = process.env.WINDOWS_SIGNING_CERTIFICATE_EXPIRED === "true";
+            const expiresAt = process.env.WINDOWS_SIGNING_EXPIRES_AT;
+            const title = `${titlePrefix} ${expiresAt} UTC`;
+            const issues = await github.paginate(github.rest.issues.listForRepo, {
+              owner,
+              repo,
+              state: "all",
+              per_page: 100,
+            });
+            const alerts = issues.filter((issue) =>
+              !issue.pull_request && issue.title.startsWith(titlePrefix)
+            );
+            const openAlerts = alerts.filter((issue) => issue.state === "open");
+
+            if (!configured || !expired) {
+              for (const issue of openAlerts) {
+                await github.rest.issues.update({
+                  owner,
+                  repo,
+                  issue_number: issue.number,
+                  state: "closed",
+                });
+              }
+              return;
+            }
+
+            const parsedExpiry = /^\d{4}-\d{2}-\d{2}$/.test(expiresAt || "")
+              ? new Date(`${expiresAt}T00:00:00.000Z`)
+              : null;
+            if (
+              !parsedExpiry ||
+              Number.isNaN(parsedExpiry.getTime()) ||
+              parsedExpiry.toISOString().slice(0, 10) !== expiresAt
+            ) {
+              core.warning("Skipping the Windows certificate expiration alert because the expiry date is missing or invalid.");
+              return;
+            }
+
+            for (const issue of openAlerts.filter((openIssue) => openIssue.title !== title)) {
+              await github.rest.issues.update({
+                owner,
+                repo,
+                issue_number: issue.number,
+                state: "closed",
+              });
+            }
+
+            const matchingAlerts = alerts.filter((issue) => issue.title === title);
+            const matchingAlert =
+              matchingAlerts.find((issue) => issue.state === "open") || matchingAlerts[0];
+            if (matchingAlert) {
+              for (const duplicate of alerts.filter(
+                (issue) => issue.number !== matchingAlert.number && issue.state === "open"
+              )) {
+                await github.rest.issues.update({
+                  owner,
+                  repo,
+                  issue_number: duplicate.number,
+                  state: "closed",
+                });
+              }
+              const maintainerMention =
+                process.env.WINDOWS_SIGNING_MAINTAINERS?.trim() || `@${owner}`;
+              const runUrl = `${process.env.GITHUB_SERVER_URL}/${owner}/${repo}/actions/runs/${process.env.GITHUB_RUN_ID}`;
+              const body = [
+                `${maintainerMention} The configured Windows publisher certificate expired on **${expiresAt} UTC**.`,
+                "",
+                "Please renew the certificate before the next Windows release.",
+                "",
+                `[View the scheduled certificate check](${runUrl})`,
+              ].join("\n");
+              await github.rest.issues.update({
+                owner,
+                repo,
+                issue_number: matchingAlert.number,
+                body,
+                ...(matchingAlert.state === "closed" ? { state: "open" } : {}),
+              });
+              return;
+            }
+
+            const maintainerMention =
+              process.env.WINDOWS_SIGNING_MAINTAINERS?.trim() || `@${owner}`;
+            await github.rest.issues.create({
+              owner,
+              repo,
+              title,
+              body: [
+                `${maintainerMention} The configured Windows publisher certificate expired on **${expiresAt} UTC**.`,
+                "",
+                "Please renew the certificate before the next Windows release.",
+              ].join("\n"),
+            });
+
+  build-renderer:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.26.1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile --filter @workspace/tt-turnier...
+      - name: Build the Windows release renderer
+        env:
+          TT_TURNIER_RELEASE_BUILD: ${{ github.event_name == 'release' }}
+        run: pnpm --filter @workspace/tt-turnier run build:desktop
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tt-turnier-renderer
+          path: artifacts/tt-turnier/dist/public/
+          if-no-files-found: error
+
+  test-certificate-expiry:
+    if: github.event_name != 'schedule'
+    strategy:
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test Windows signing certificate usage and validity checks
+        shell: pwsh
+        run: ./scripts/test-windows-signing-certificate.ps1
+
+  test-certificate-renewal-reminders:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test Windows certificate renewal reminders
+        run: node ./scripts/test-windows-certificate-renewal-reminders.mjs
+
+  test-missing-signing-alert:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test Windows signing configuration alerts
+        run: node ./scripts/test-windows-signing-alert.mjs
+
+  test-missed-signing-check-alert:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test recovery from a missed Windows signing check
+        run: node ./scripts/test-windows-signing-check-monitor.mjs
+
+  test-incomplete-signing-packaging:
+    if: github.event_name != 'schedule'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Reject Windows packaging with incomplete signing secrets
+        shell: pwsh
+        run: ./scripts/test-incomplete-windows-signing-packaging.ps1
+
+  test-invalid-signing-packaging:
+    if: github.event_name != 'schedule'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Reject Windows packaging with invalid signing certificate data
+        shell: pwsh
+        run: ./scripts/test-invalid-windows-signing-packaging.ps1
+
+  test-partial-packaging-cleanup:
+    if: github.event_name != 'schedule'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Remove partial Windows builds after packaging failures
+        shell: pwsh
+        run: ./scripts/test-partial-windows-packaging-cleanup.ps1
+
+  test-windows-zip-checksum:
+    if: github.event_name != 'schedule'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test portable update ZIP extraction and path safety
+        run: node --test artifacts/tt-turnier/electron/windows-zip-update.windows.test.cjs
+      - name: Test Windows ZIP checksum verification
+        shell: pwsh
+        run: ./scripts/test-windows-zip-checksum.ps1
+
+  test-windows-release-assets:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test Windows update availability checks
+        run: pnpm --filter @workspace/tt-turnier run test:desktop-update
+      - name: Test mocked Windows release asset verification
+        run: bash ./scripts/test-windows-release-assets.sh
+      - name: Test Windows release upload rollback and retry
+        run: bash ./scripts/test-publish-windows-release-assets.sh
+
+  test-unsigned-windows-packaging:
+    if: github.event_name != 'schedule'
+    needs: build-renderer
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.26.1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - uses: actions/download-artifact@v4
+        with:
+          name: tt-turnier-renderer
+          path: artifacts/tt-turnier/dist/public
+      - run: pnpm install --frozen-lockfile --filter @workspace/tt-turnier...
+      - name: Package and verify unsigned Windows builds without secrets
+        env:
+          WINDOWS_CERTIFICATE_BASE64: ""
+          WINDOWS_CERTIFICATE_PASSWORD: ""
+        shell: pwsh
+        run: ./scripts/package-windows-builds.ps1
+
+  test-signed-windows-packaging:
+    if: github.event_name != 'schedule'
+    needs: build-renderer
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.26.1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - uses: actions/download-artifact@v4
+        with:
+          name: tt-turnier-renderer
+          path: artifacts/tt-turnier/dist/public
+      - run: pnpm install --frozen-lockfile --filter @workspace/tt-turnier...
+      - name: Package and verify signed Windows builds with a temporary certificate
+        shell: pwsh
+        run: ./scripts/test-signed-windows-packaging.ps1
+
+  build-installer:
+    if: github.event_name != 'schedule'
+    needs:
+      - build-renderer
+      - test-certificate-expiry
+      - test-certificate-renewal-reminders
+      - test-incomplete-signing-packaging
+      - test-invalid-signing-packaging
+      - test-partial-packaging-cleanup
+      - test-unsigned-windows-packaging
+      - test-signed-windows-packaging
+      - test-windows-zip-checksum
+      - test-windows-release-assets
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.26.1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - uses: actions/download-artifact@v4
+        with:
+          name: tt-turnier-renderer
+          path: artifacts/tt-turnier/dist/public
+      - run: pnpm install --frozen-lockfile --filter @workspace/tt-turnier...
+      - name: Package signed or unsigned Windows builds
+        env:
+          WINDOWS_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        shell: pwsh
+        run: |
+          ./scripts/package-windows-builds.ps1
+      - name: Package older Windows upgrade smoke installer
+        shell: pwsh
+        run: |
+          $packageVersion = node -p "require('./artifacts/tt-turnier/package.json').version"
+          if ($packageVersion -notmatch '^(\d+)\.(\d+)\.(\d+)$') {
+            throw "Expected a stable three-part app version for the Windows upgrade smoke test, found '$packageVersion'."
+          }
+          $baselineVersion = "$packageVersion-smoke.0"
+          $baselineOutputDirectory = Join-Path $env:GITHUB_WORKSPACE "generated-artifacts/tt-turnier-windows-baseline"
+          if (Test-Path $baselineOutputDirectory) {
+            Remove-Item -Recurse -Force $baselineOutputDirectory
+          }
+          $mainScriptPath = Join-Path $env:GITHUB_WORKSPACE "artifacts/tt-turnier/electron/main.cjs"
+          $baselineMainScriptPath = Join-Path $env:RUNNER_TEMP "tt-turnier-main-baseline.cjs"
+          $mainScriptBackupPath = Join-Path $env:RUNNER_TEMP "tt-turnier-main-current.cjs"
+          git show "HEAD^:artifacts/tt-turnier/electron/main.cjs" | Out-File -FilePath $baselineMainScriptPath -Encoding utf8
+          if ($LASTEXITCODE -ne 0) {
+            throw "Could not read the previous Windows app entry point for the upgrade smoke test."
+          }
+          Copy-Item -LiteralPath $mainScriptPath -Destination $mainScriptBackupPath -Force
+          try {
+            Copy-Item -LiteralPath $baselineMainScriptPath -Destination $mainScriptPath -Force
+            Write-Host "Packaging older Windows upgrade smoke build $baselineVersion before app version $packageVersion."
+            pnpm --filter @workspace/tt-turnier exec electron-builder --win nsis "--config.extraMetadata.version=$baselineVersion" "--config.directories.output=$baselineOutputDirectory"
+            if ($LASTEXITCODE -ne 0) {
+              throw "The older Windows upgrade smoke installer packaging failed with exit code $LASTEXITCODE."
+            }
+            pnpm --filter @workspace/tt-turnier exec electron-builder --win zip "--config.extraMetadata.version=$baselineVersion" "--config.directories.output=$baselineOutputDirectory"
+            if ($LASTEXITCODE -ne 0) {
+              throw "The older Windows ZIP smoke packaging failed with exit code $LASTEXITCODE."
+            }
+          } finally {
+            Copy-Item -LiteralPath $mainScriptBackupPath -Destination $mainScriptPath -Force
+            Remove-Item -LiteralPath $baselineMainScriptPath, $mainScriptBackupPath -Force -ErrorAction SilentlyContinue
+          }
+          $baselineInstallers = @(Get-ChildItem $baselineOutputDirectory -Filter "Tischtennis-Turnier-*-x64.exe" -File)
+          if ($baselineInstallers.Count -ne 1) {
+            throw "Expected exactly one older Windows smoke installer, found $($baselineInstallers.Count)."
+          }
+          Rename-Item -LiteralPath $baselineInstallers[0].FullName -NewName "Tischtennis-Turnier-baseline.exe"
+          $baselineZips = @(Get-ChildItem $baselineOutputDirectory -Filter "Tischtennis-Turnier-*-x64.zip" -File)
+          if ($baselineZips.Count -ne 1) {
+            throw "Expected exactly one older Windows smoke ZIP, found $($baselineZips.Count)."
+          }
+          Rename-Item -LiteralPath $baselineZips[0].FullName -NewName "Tischtennis-Turnier-baseline.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tt-turnier-windows-builds
+          path: |
+            generated-artifacts/tt-turnier-windows/Tischtennis-Turnier-*-x64-*.exe
+            generated-artifacts/tt-turnier-windows/Tischtennis-Turnier-*-x64-*.exe.sha256
+            generated-artifacts/tt-turnier-windows/Tischtennis-Turnier-*-x64-*.zip
+            generated-artifacts/tt-turnier-windows/Tischtennis-Turnier-*-x64-*.zip.sha256
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tt-turnier-windows-baseline
+          path: |
+            generated-artifacts/tt-turnier-windows-baseline/Tischtennis-Turnier-baseline.exe
+            generated-artifacts/tt-turnier-windows-baseline/Tischtennis-Turnier-baseline.zip
+          if-no-files-found: error
+
+  smoke-test-installer:
+    if: github.event_name != 'schedule'
+    needs: build-installer
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.26.1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: actions/download-artifact@v4
+        with:
+          name: tt-turnier-windows-builds
+          path: generated-artifacts/tt-turnier-windows
+      - uses: actions/download-artifact@v4
+        with:
+          name: tt-turnier-windows-baseline
+          path: generated-artifacts/tt-turnier-windows-baseline
+      - name: Verify downloaded installer checksum
+        shell: pwsh
+        run: |
+          $installers = @(Get-ChildItem "generated-artifacts/tt-turnier-windows" -Filter "Tischtennis-Turnier-*-x64-*.exe" -File)
+          if ($installers.Count -ne 1) {
+            throw "Expected exactly one Windows installer, found $($installers.Count)."
+          }
+
+          $installer = $installers[0]
+          $checksumPath = "$($installer.FullName).sha256"
+          if (-not (Test-Path -LiteralPath $checksumPath -PathType Leaf)) {
+            throw "The downloaded Windows installer checksum is missing."
+          }
+
+          $checksumLine = [IO.File]::ReadAllText($checksumPath)
+          if ($checksumLine -notmatch '\A([0-9a-fA-F]{64})  ([^\r\n]+)(?:\r?\n)?\z') {
+            throw "The downloaded Windows installer checksum has an invalid format."
+          }
+          $checksumHash = $Matches[1]
+          $checksumFileName = $Matches[2]
+          if ($checksumFileName -cne $installer.Name) {
+            throw "The downloaded Windows installer checksum names a different file."
+          }
+
+          $actualHash = (Get-FileHash -LiteralPath $installer.FullName -Algorithm SHA256).Hash
+          if ($checksumHash -ine $actualHash) {
+            throw "The downloaded Windows installer does not match its SHA-256 checksum."
+          }
+          Write-Host "Verified SHA-256 checksum for $($installer.Name)."
+      - name: Verify downloaded ZIP checksum
+        shell: pwsh
+        run: |
+          $zipBuilds = @(Get-ChildItem "generated-artifacts/tt-turnier-windows" -Filter "Tischtennis-Turnier-*-x64-*.zip" -File)
+          if ($zipBuilds.Count -ne 1) {
+            throw "Expected exactly one Windows ZIP build, found $($zipBuilds.Count)."
+          }
+
+          . "$env:GITHUB_WORKSPACE/scripts/windows-zip-checksum.ps1"
+          Test-WindowsZipChecksum -ZipPath $zipBuilds[0].FullName
+      - name: Verify downloaded Windows signatures and trusted timestamps
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $installers = @(Get-ChildItem "generated-artifacts/tt-turnier-windows" -Filter "Tischtennis-Turnier-*-x64-*.exe" -File)
+          $zipBuilds = @(Get-ChildItem "generated-artifacts/tt-turnier-windows" -Filter "Tischtennis-Turnier-*-x64-*.zip" -File)
+          if ($installers.Count -ne 1 -or $zipBuilds.Count -ne 1) {
+            throw "Expected exactly one downloaded Windows installer and ZIP build."
+          }
+
+          if ($installers[0].Name -match '-signed\.exe$') {
+            $expectedSigning = "signed"
+          } elseif ($installers[0].Name -match '-unsigned\.exe$') {
+            $expectedSigning = "unsigned"
+          } else {
+            throw "The downloaded Windows installer does not identify whether it is signed or unsigned."
+          }
+          if ($zipBuilds[0].Name -notmatch "-$expectedSigning\.zip$") {
+            throw "The downloaded Windows installer and ZIP do not have matching signing labels."
+          }
+
+          $zipCheckDirectory = Join-Path $env:RUNNER_TEMP "tt-turnier-downloaded-signature-check"
+          try {
+            New-Item -ItemType Directory -Path $zipCheckDirectory -Force | Out-Null
+            [System.IO.Compression.ZipFile]::ExtractToDirectory($zipBuilds[0].FullName, $zipCheckDirectory)
+            $zipExecutables = @(
+              Get-ChildItem -LiteralPath $zipCheckDirectory -File -Recurse |
+                Where-Object { $_.Extension -ieq ".exe" }
+            )
+            if ($zipExecutables.Count -eq 0) {
+              throw "The downloaded Windows ZIP contains no executables to verify."
+            }
+
+            $signaturePaths = @($installers[0].FullName) + @($zipExecutables | ForEach-Object { $_.FullName })
+            foreach ($signaturePath in $signaturePaths) {
+              $signature = Get-AuthenticodeSignature -FilePath $signaturePath
+              if ($expectedSigning -eq "signed") {
+                if ($signature.Status -ne [System.Management.Automation.SignatureStatus]::Valid) {
+                  throw "Downloaded signed file '$([IO.Path]::GetFileName($signaturePath))' is not validly signed: $($signature.StatusMessage)"
+                }
+                if (-not $signature.SignerCertificate) {
+                  throw "Downloaded signed file '$([IO.Path]::GetFileName($signaturePath))' has no publisher certificate."
+                }
+                if (-not $signature.TimeStamperCertificate) {
+                  throw "Downloaded signed file '$([IO.Path]::GetFileName($signaturePath))' has no trusted timestamp."
+                }
+                Write-Host "Verified downloaded signature and trusted timestamp for $([IO.Path]::GetFileName($signaturePath))."
+              } elseif ($signature.Status -ne [System.Management.Automation.SignatureStatus]::NotSigned) {
+                throw "Expected downloaded file '$([IO.Path]::GetFileName($signaturePath))' to be unsigned, found signature status $($signature.Status)."
+              } else {
+                Write-Host "Verified downloaded unsigned file $([IO.Path]::GetFileName($signaturePath))."
+              }
+            }
+          } finally {
+            if (Test-Path -LiteralPath $zipCheckDirectory) {
+              Remove-Item -LiteralPath $zipCheckDirectory -Recurse -Force
+            }
+          }
+      - name: Install older Windows setup before testing the update
+        shell: pwsh
+        run: |
+          $installers = @(Get-ChildItem "generated-artifacts/tt-turnier-windows" -Filter "Tischtennis-Turnier-*-x64-*.exe")
+          if ($installers.Count -ne 1) {
+            throw "Expected exactly one Windows installer, found $($installers.Count)."
+          }
+          $baselineInstaller = Join-Path $env:GITHUB_WORKSPACE "generated-artifacts/tt-turnier-windows-baseline/Tischtennis-Turnier-baseline.exe"
+          if (-not (Test-Path -LiteralPath $baselineInstaller -PathType Leaf)) {
+            throw "The older Windows upgrade smoke installer is missing."
+          }
+
+          $installDirectory = Join-Path $env:RUNNER_TEMP "tt-turnier-smoke-install"
+          $alternateInstallDirectory = Join-Path $env:RUNNER_TEMP "tt-turnier-smoke-install-alternate"
+          $install = Start-Process -FilePath $baselineInstaller -ArgumentList @("/S", "/D=$installDirectory") -Wait -PassThru
+          if ($install.ExitCode -ne 0) {
+            throw "The older Windows smoke installer failed with exit code $($install.ExitCode)."
+          }
+          if (Test-Path -LiteralPath $alternateInstallDirectory) {
+            throw "The alternate Windows smoke install directory already exists."
+          }
+
+          $app = Get-ChildItem $installDirectory -Filter "Tischtennis-Turnier.exe" -File -Recurse | Select-Object -First 1
+          if (-not $app) {
+            throw "The older installer completed but Tischtennis-Turnier.exe was not found."
+          }
+
+          "Installed older executable: $($app.FullName)" | Out-Host
+          "TT_TURNIER_APP_PATH=$($app.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "TT_TURNIER_INSTALLER_PATH=$($installers[0].FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "TT_TURNIER_INSTALL_DIRECTORY=$installDirectory" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "TT_TURNIER_ALTERNATE_INSTALL_DIRECTORY=$alternateInstallDirectory" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Extract standalone ZIP app
+        shell: pwsh
+        run: |
+          $zipBuilds = @(Get-ChildItem "generated-artifacts/tt-turnier-windows" -Filter "Tischtennis-Turnier-*-x64-*.zip" -File)
+          if ($zipBuilds.Count -ne 1) {
+            throw "Expected exactly one Windows ZIP build, found $($zipBuilds.Count)."
+          }
+          $baselineZip = Join-Path $env:GITHUB_WORKSPACE "generated-artifacts/tt-turnier-windows-baseline/Tischtennis-Turnier-baseline.zip"
+          if (-not (Test-Path -LiteralPath $baselineZip -PathType Leaf)) {
+            throw "The older Windows ZIP smoke build is missing."
+          }
+
+          $zipDirectory = Join-Path $env:RUNNER_TEMP "tt turnier zip smoke"
+          $updatedZipDirectory = Join-Path $zipDirectory "updated"
+          $unicodeZipDirectory = Join-Path $zipDirectory "tt-turnier-über_日本語"
+          $deeplyNestedZipDirectory = Join-Path $zipDirectory "deeply-nested\downloads\shared-tournament-tools\release-assets\standalone-windows-app\extracted-from-zip\organizer-workstation\table-tennis-tournament\portable"
+          New-Item -ItemType Directory -Path $updatedZipDirectory, $unicodeZipDirectory, $deeplyNestedZipDirectory -Force | Out-Null
+          [System.IO.Compression.ZipFile]::ExtractToDirectory($zipBuilds[0].FullName, $updatedZipDirectory)
+          [System.IO.Compression.ZipFile]::ExtractToDirectory($zipBuilds[0].FullName, $unicodeZipDirectory)
+          [System.IO.Compression.ZipFile]::ExtractToDirectory($baselineZip, $deeplyNestedZipDirectory)
+          $updatedZipApp = @(Get-ChildItem $updatedZipDirectory -Filter "Tischtennis-Turnier.exe" -File -Recurse)
+          if ($updatedZipApp.Count -ne 1) {
+            throw "Expected exactly one Tischtennis-Turnier.exe in the updated Windows ZIP, found $($updatedZipApp.Count)."
+          }
+          $unicodeZipApp = @(Get-ChildItem $unicodeZipDirectory -Filter "Tischtennis-Turnier.exe" -File -Recurse)
+          if ($unicodeZipApp.Count -ne 1) {
+            throw "Expected exactly one Tischtennis-Turnier.exe in the Unicode-path Windows ZIP, found $($unicodeZipApp.Count)."
+          }
+          $deeplyNestedZipApp = @(Get-ChildItem $deeplyNestedZipDirectory -Filter "Tischtennis-Turnier.exe" -File -Recurse)
+          if ($deeplyNestedZipApp.Count -ne 1) {
+            throw "Expected exactly one Tischtennis-Turnier.exe in the deeply nested Windows ZIP, found $($deeplyNestedZipApp.Count)."
+          }
+
+          "Extracted updated ZIP executable: $($updatedZipApp[0].FullName)" | Out-Host
+          "Extracted Unicode-path ZIP executable: $($unicodeZipApp[0].FullName)" | Out-Host
+          "Extracted older ZIP executable in the deeply nested folder: $($deeplyNestedZipApp[0].FullName)" | Out-Host
+          "TT_TURNIER_UPDATED_ZIP_APP_PATH=$($updatedZipApp[0].FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "TT_TURNIER_UNICODE_ZIP_APP_PATH=$($unicodeZipApp[0].FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "TT_TURNIER_DEEPLY_NESTED_OLD_ZIP_APP_PATH=$($deeplyNestedZipApp[0].FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "TT_TURNIER_UPDATED_ZIP_DIRECTORY=$updatedZipDirectory" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "TT_TURNIER_UNICODE_ZIP_DIRECTORY=$unicodeZipDirectory" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "TT_TURNIER_DEEPLY_NESTED_ZIP_DIRECTORY=$deeplyNestedZipDirectory" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Extract and launch ZIP near the Windows path-length limit
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $zipBuilds = @(Get-ChildItem "generated-artifacts/tt-turnier-windows" -Filter "Tischtennis-Turnier-*-x64-*.zip" -File)
+          if ($zipBuilds.Count -ne 1) {
+            throw "Expected exactly one Windows ZIP build for the near-limit path test, found $($zipBuilds.Count)."
+          }
+
+          $targetExecutablePathLength = 250
+          $updatedZipDirectory = [IO.Path]::GetFullPath($env:TT_TURNIER_UPDATED_ZIP_DIRECTORY)
+          $updatedZipPrefix = $updatedZipDirectory + [IO.Path]::DirectorySeparatorChar
+          $updatedZipExecutable = [IO.Path]::GetFullPath($env:TT_TURNIER_UPDATED_ZIP_APP_PATH)
+          if (-not $updatedZipExecutable.StartsWith($updatedZipPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "The updated ZIP executable is not inside its expected extraction folder."
+          }
+          $relativeExecutablePath = $updatedZipExecutable.Substring($updatedZipPrefix.Length)
+          $targetDirectoryPathLength = $targetExecutablePathLength - 1 - $relativeExecutablePath.Length
+          $longPathDirectory = Join-Path $env:RUNNER_TEMP "tt-turnier-near-limit"
+          if ($longPathDirectory.Length -gt $targetDirectoryPathLength) {
+            throw "The Windows runner temporary path is already too long to place the ZIP executable near the 260-character path limit."
+          }
+          while ($longPathDirectory.Length -lt $targetDirectoryPathLength) {
+            $remaining = $targetDirectoryPathLength - $longPathDirectory.Length
+            $segmentLength = [Math]::Min(40, [Math]::Max(1, $remaining - 1))
+            $segment = "p" * $segmentLength
+            $longPathDirectory = Join-Path $longPathDirectory $segment
+          }
+
+          try {
+            New-Item -ItemType Directory -Path $longPathDirectory -Force | Out-Null
+          } catch {
+            throw "The Windows runner could not create the near-limit ZIP extraction folder (target executable path length $targetExecutablePathLength): $($_.Exception.Message)"
+          }
+
+          try {
+            [System.IO.Compression.ZipFile]::ExtractToDirectory($zipBuilds[0].FullName, $longPathDirectory)
+          } catch {
+            throw "The Windows runner could not extract the ZIP near the traditional path-length limit at $longPathDirectory`: $($_.Exception.Message)"
+          }
+
+          $longPathAppPath = Join-Path $longPathDirectory $relativeExecutablePath
+          try {
+            $longPathApp = Get-Item -LiteralPath $longPathAppPath -ErrorAction Stop
+          } catch {
+            throw "The Windows runner could not access the executable extracted near the path-length limit at $longPathAppPath`: $($_.Exception.Message)"
+          }
+          $actualExecutablePathLength = $longPathApp.FullName.Length
+          if ($actualExecutablePathLength -lt 240 -or $actualExecutablePathLength -gt 259) {
+            throw "The near-limit ZIP executable path must be between 240 and 259 characters, found $actualExecutablePathLength at $($longPathApp.FullName)."
+          }
+
+          "Extracted near-limit ZIP executable ($actualExecutablePathLength characters): $($longPathApp.FullName)" | Out-Host
+          "TT_TURNIER_NEAR_LIMIT_ZIP_APP_PATH=$($longPathApp.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Verify near-limit ZIP launches and displays the tournament overview
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $nodePath = (Get-Command node).Source
+          $smokeScriptPath = Join-Path $env:GITHUB_WORKSPACE "artifacts/tt-turnier/scripts/windows-installer-smoke.mjs"
+          try {
+            & $nodePath $smokeScriptPath --zip-long-path $env:TT_TURNIER_NEAR_LIMIT_ZIP_APP_PATH
+            if ($LASTEXITCODE -ne 0) {
+              throw "The smoke test exited with code $LASTEXITCODE."
+            }
+          } catch {
+            throw "The near-limit Windows ZIP launch or tournament overview check failed: $($_.Exception.Message)"
+          }
+      - name: Verify ZIP persistence, account isolation, and Unicode profiles
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $accountName = "ttzip-$([guid]::NewGuid().ToString('N').Substring(0, 10))"
+          $passwordText = [Convert]::ToBase64String([Security.Cryptography.RandomNumberGenerator]::GetBytes(32))
+          $password = ConvertTo-SecureString $passwordText -AsPlainText -Force
+          $user = New-LocalUser -Name $accountName -Password $password -AccountNeverExpires -UserMayNotChangePassword -Description "Temporary standard-user Windows ZIP smoke test account"
+          $identity = "$env:COMPUTERNAME\$accountName"
+          $workDirectory = Join-Path $env:RUNNER_TEMP "tt-turnier-standard-user-smoke"
+          $secondAccountName = "ttzip2-$([guid]::NewGuid().ToString('N').Substring(0, 10))"
+          $secondPasswordText = [Convert]::ToBase64String([Security.Cryptography.RandomNumberGenerator]::GetBytes(32))
+          $secondPassword = ConvertTo-SecureString $secondPasswordText -AsPlainText -Force
+          $secondIdentity = "$env:COMPUTERNAME\$secondAccountName"
+          $secondWorkDirectory = Join-Path $env:RUNNER_TEMP "tt-turnier-second-standard-user-smoke"
+          $unicodeAccountName = "tt-smök-$([guid]::NewGuid().ToString('N').Substring(0, 10))"
+          $unicodePasswordText = [Convert]::ToBase64String([Security.Cryptography.RandomNumberGenerator]::GetBytes(32))
+          $unicodePassword = ConvertTo-SecureString $unicodePasswordText -AsPlainText -Force
+          $unicodeIdentity = "$env:COMPUTERNAME\$unicodeAccountName"
+          $unicodeWorkDirectory = Join-Path $env:RUNNER_TEMP "tt-turnier-unicode-profile-smoke"
+
+          try {
+            $secondUser = New-LocalUser -Name $secondAccountName -Password $secondPassword -AccountNeverExpires -UserMayNotChangePassword -Description "Temporary second standard-user Windows ZIP isolation test account"
+            $unicodeUser = New-LocalUser -Name $unicodeAccountName -Password $unicodePassword -AccountNeverExpires -UserMayNotChangePassword -Description "Temporary standard-user Unicode-profile Windows ZIP smoke test account"
+            $adminGroup = Get-LocalGroup -SID "S-1-5-32-544"
+            foreach ($standardUser in @($user, $secondUser, $unicodeUser)) {
+              $adminMember = Get-LocalGroupMember -Group $adminGroup | Where-Object {
+                $_.SID -eq $standardUser.SID
+              }
+              if ($adminMember) {
+                throw "A temporary ZIP smoke test account unexpectedly belongs to the Administrators group."
+              }
+            }
+            $usersGroup = Get-LocalGroup -SID "S-1-5-32-545"
+            foreach ($standardUser in @($user, $secondUser, $unicodeUser)) {
+              Add-LocalGroupMember -Group $usersGroup -Member $standardUser
+            }
+
+            New-Item -ItemType Directory -Path $workDirectory, $secondWorkDirectory, $unicodeWorkDirectory -Force | Out-Null
+            & icacls.exe $workDirectory /grant "${identity}:(OI)(CI)M"
+            if ($LASTEXITCODE -ne 0) {
+              throw "Could not grant the temporary ZIP smoke test account access to its log directory."
+            }
+            & icacls.exe $secondWorkDirectory /grant "${secondIdentity}:(OI)(CI)M"
+            if ($LASTEXITCODE -ne 0) {
+              throw "Could not grant the second temporary ZIP smoke test account access to its log directory."
+            }
+            & icacls.exe $unicodeWorkDirectory /grant "${unicodeIdentity}:(OI)(CI)M"
+            if ($LASTEXITCODE -ne 0) {
+              throw "Could not grant the Unicode-profile ZIP smoke test account access to its log directory."
+            }
+            & icacls.exe $env:TT_TURNIER_UPDATED_ZIP_DIRECTORY /grant "${identity}:(OI)(CI)M" /T /C
+            if ($LASTEXITCODE -ne 0) {
+              throw "Could not grant the temporary ZIP smoke test account read access to the updated extracted app."
+            }
+            & icacls.exe $env:TT_TURNIER_UPDATED_ZIP_DIRECTORY /grant "${secondIdentity}:(OI)(CI)RX" /T /C
+            if ($LASTEXITCODE -ne 0) {
+              throw "Could not grant the second temporary ZIP smoke test account read access to the updated extracted app."
+            }
+            & icacls.exe $env:TT_TURNIER_UPDATED_ZIP_DIRECTORY /grant "${unicodeIdentity}:(OI)(CI)RX" /T /C
+            if ($LASTEXITCODE -ne 0) {
+              throw "Could not grant the Unicode-profile ZIP smoke test account read access to the extracted app."
+            }
+            & icacls.exe $env:TT_TURNIER_UNICODE_ZIP_DIRECTORY /grant "${identity}:(OI)(CI)RX" /T /C
+            if ($LASTEXITCODE -ne 0) {
+              throw "Could not grant the temporary ZIP smoke test account read access to the Unicode-path extracted app."
+            }
+            & icacls.exe $env:TT_TURNIER_DEEPLY_NESTED_ZIP_DIRECTORY /grant "${identity}:(OI)(CI)M" /T /C
+            if ($LASTEXITCODE -ne 0) {
+              throw "Could not grant the temporary ZIP smoke test account permission to replace the deeply nested extracted app files."
+            }
+
+            $nodePath = (Get-Command node).Source
+            $smokeScriptPath = Join-Path $workDirectory "windows-installer-smoke.mjs"
+            Copy-Item -LiteralPath (Join-Path $env:GITHUB_WORKSPACE "artifacts/tt-turnier/scripts/windows-installer-smoke.mjs") -Destination $smokeScriptPath
+            $stdoutPath = Join-Path $workDirectory "smoke.stdout.log"
+            $stderrPath = Join-Path $workDirectory "smoke.stderr.log"
+            $credential = [PSCredential]::new("$env:COMPUTERNAME\$accountName", $password)
+
+            $deeplyNestedStdoutPath = Join-Path $workDirectory "deeply-nested-smoke.stdout.log"
+            $deeplyNestedStderrPath = Join-Path $workDirectory "deeply-nested-smoke.stderr.log"
+            $deeplyNestedArguments = '"{0}" --zip "{1}"' -f $smokeScriptPath, $env:TT_TURNIER_DEEPLY_NESTED_OLD_ZIP_APP_PATH
+            $deeplyNestedProcess = Start-Process -FilePath $nodePath -ArgumentList $deeplyNestedArguments -Credential $credential -LoadUserProfile -WorkingDirectory $workDirectory -Wait -PassThru -RedirectStandardOutput $deeplyNestedStdoutPath -RedirectStandardError $deeplyNestedStderrPath
+
+            if (Test-Path -LiteralPath $deeplyNestedStdoutPath) {
+              Get-Content -LiteralPath $deeplyNestedStdoutPath | Out-Host
+            }
+            if (Test-Path -LiteralPath $deeplyNestedStderrPath) {
+              Get-Content -LiteralPath $deeplyNestedStderrPath | Out-Host
+            }
+            if ($deeplyNestedProcess.ExitCode -ne 0) {
+              throw "The standalone ZIP smoke test failed from a deeply nested folder as a standard user with exit code $($deeplyNestedProcess.ExitCode)."
+            }
+
+            $arguments = '"{0}" --zip-update "{1}" "{2}" --standard-user' -f $smokeScriptPath, $env:TT_TURNIER_DEEPLY_NESTED_OLD_ZIP_APP_PATH, $env:TT_TURNIER_UPDATED_ZIP_APP_PATH
+            $process = Start-Process -FilePath $nodePath -ArgumentList $arguments -Credential $credential -LoadUserProfile -WorkingDirectory $workDirectory -Wait -PassThru -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
+
+            if (Test-Path -LiteralPath $stdoutPath) {
+              Get-Content -LiteralPath $stdoutPath | Out-Host
+            }
+            if (Test-Path -LiteralPath $stderrPath) {
+              Get-Content -LiteralPath $stderrPath | Out-Host
+            }
+            if ($process.ExitCode -ne 0) {
+              throw "The standalone ZIP smoke test failed as a standard user with exit code $($process.ExitCode)."
+            }
+
+            $currentZip = @(Get-ChildItem "generated-artifacts/tt-turnier-windows" -Filter "Tischtennis-Turnier-*-x64-*.zip" -File)
+            if ($currentZip.Count -ne 1) {
+              throw "Expected exactly one current Windows ZIP for the repeated replacement checks, found $($currentZip.Count)."
+            }
+            for ($replacement = 1; $replacement -le 2; $replacement++) {
+              Write-Host "Signing out the standard user before repeated ZIP replacement $replacement."
+              Remove-Item -LiteralPath $env:TT_TURNIER_UPDATED_ZIP_DIRECTORY -Recurse -Force
+              New-Item -ItemType Directory -Path $env:TT_TURNIER_UPDATED_ZIP_DIRECTORY -Force | Out-Null
+              [System.IO.Compression.ZipFile]::ExtractToDirectory($currentZip[0].FullName, $env:TT_TURNIER_UPDATED_ZIP_DIRECTORY)
+              & icacls.exe $env:TT_TURNIER_UPDATED_ZIP_DIRECTORY /grant "${identity}:(OI)(CI)M" /T /C
+              if ($LASTEXITCODE -ne 0) {
+                throw "Could not grant the first standard account permission to use its replacement ZIP app."
+              }
+              & icacls.exe $env:TT_TURNIER_UPDATED_ZIP_DIRECTORY /grant "${secondIdentity}:(OI)(CI)RX" /T /C
+              if ($LASTEXITCODE -ne 0) {
+                throw "Could not grant the second standard account read access to the replacement ZIP app."
+              }
+              & icacls.exe $env:TT_TURNIER_UPDATED_ZIP_DIRECTORY /grant "${unicodeIdentity}:(OI)(CI)RX" /T /C
+              if ($LASTEXITCODE -ne 0) {
+                throw "Could not grant the Unicode-profile standard account read access to the replacement ZIP app."
+              }
+
+              $replacementStdoutPath = Join-Path $workDirectory "replacement-$replacement.stdout.log"
+              $replacementStderrPath = Join-Path $workDirectory "replacement-$replacement.stderr.log"
+              $replacementArguments = '"{0}" --zip-existing "{1}" --standard-user' -f $smokeScriptPath, $env:TT_TURNIER_UPDATED_ZIP_APP_PATH
+              $replacementProcess = Start-Process -FilePath $nodePath -ArgumentList $replacementArguments -Credential $credential -LoadUserProfile -WorkingDirectory $workDirectory -Wait -PassThru -RedirectStandardOutput $replacementStdoutPath -RedirectStandardError $replacementStderrPath
+              if (Test-Path -LiteralPath $replacementStdoutPath) {
+                Get-Content -LiteralPath $replacementStdoutPath | Out-Host
+              }
+              if (Test-Path -LiteralPath $replacementStderrPath) {
+                Get-Content -LiteralPath $replacementStderrPath | Out-Host
+              }
+              if ($replacementProcess.ExitCode -ne 0) {
+                throw "The first standard account could not reopen its data after ZIP replacement $replacement (exit code $($replacementProcess.ExitCode))."
+              }
+            }
+
+            $unicodeStdoutPath = Join-Path $workDirectory "unicode-path-smoke.stdout.log"
+            $unicodeStderrPath = Join-Path $workDirectory "unicode-path-smoke.stderr.log"
+            $unicodeArguments = '"{0}" --zip-existing "{1}" --standard-user' -f $smokeScriptPath, $env:TT_TURNIER_UNICODE_ZIP_APP_PATH
+            $unicodeProcess = Start-Process -FilePath $nodePath -ArgumentList $unicodeArguments -Credential $credential -LoadUserProfile -WorkingDirectory $workDirectory -Wait -PassThru -RedirectStandardOutput $unicodeStdoutPath -RedirectStandardError $unicodeStderrPath
+
+            if (Test-Path -LiteralPath $unicodeStdoutPath) {
+              Get-Content -LiteralPath $unicodeStdoutPath | Out-Host
+            }
+            if (Test-Path -LiteralPath $unicodeStderrPath) {
+              Get-Content -LiteralPath $unicodeStderrPath | Out-Host
+            }
+            if ($unicodeProcess.ExitCode -ne 0) {
+              throw "The Unicode-path ZIP persistence smoke test failed as a standard user with exit code $($unicodeProcess.ExitCode)."
+            }
+
+            $unicodeSmokeScriptPath = Join-Path $unicodeWorkDirectory "windows-installer-smoke.mjs"
+            Copy-Item -LiteralPath (Join-Path $env:GITHUB_WORKSPACE "artifacts/tt-turnier/scripts/windows-installer-smoke.mjs") -Destination $unicodeSmokeScriptPath
+            $unicodeProfileStdoutPath = Join-Path $unicodeWorkDirectory "unicode-profile-smoke.stdout.log"
+            $unicodeProfileStderrPath = Join-Path $unicodeWorkDirectory "unicode-profile-smoke.stderr.log"
+            $unicodeCredential = [PSCredential]::new("$env:COMPUTERNAME\$unicodeAccountName", $unicodePassword)
+            $unicodeProfileArguments = '"{0}" --zip "{1}" --standard-user --unicode-profile' -f $unicodeSmokeScriptPath, $env:TT_TURNIER_UPDATED_ZIP_APP_PATH
+            $unicodeProfileProcess = Start-Process -FilePath $nodePath -ArgumentList $unicodeProfileArguments -Credential $unicodeCredential -LoadUserProfile -WorkingDirectory $unicodeWorkDirectory -Wait -PassThru -RedirectStandardOutput $unicodeProfileStdoutPath -RedirectStandardError $unicodeProfileStderrPath
+
+            if (Test-Path -LiteralPath $unicodeProfileStdoutPath) {
+              Get-Content -LiteralPath $unicodeProfileStdoutPath | Out-Host
+            }
+            if (Test-Path -LiteralPath $unicodeProfileStderrPath) {
+              Get-Content -LiteralPath $unicodeProfileStderrPath | Out-Host
+            }
+            if ($unicodeProfileProcess.ExitCode -ne 0) {
+              throw "The standalone ZIP smoke test failed from a Unicode Windows user profile as a standard user with exit code $($unicodeProfileProcess.ExitCode)."
+            }
+
+            $secondSmokeScriptPath = Join-Path $secondWorkDirectory "windows-installer-smoke.mjs"
+            Copy-Item -LiteralPath (Join-Path $env:GITHUB_WORKSPACE "artifacts/tt-turnier/scripts/windows-installer-smoke.mjs") -Destination $secondSmokeScriptPath
+            $secondStdoutPath = Join-Path $secondWorkDirectory "smoke.stdout.log"
+            $secondStderrPath = Join-Path $secondWorkDirectory "smoke.stderr.log"
+            $secondCredential = [PSCredential]::new("$env:COMPUTERNAME\$secondAccountName", $secondPassword)
+            $secondArguments = '"{0}" --zip-isolated "{1}" --standard-user' -f $secondSmokeScriptPath, $env:TT_TURNIER_UPDATED_ZIP_APP_PATH
+            $secondProcess = Start-Process -FilePath $nodePath -ArgumentList $secondArguments -Credential $secondCredential -LoadUserProfile -WorkingDirectory $secondWorkDirectory -Wait -PassThru -RedirectStandardOutput $secondStdoutPath -RedirectStandardError $secondStderrPath
+
+            if (Test-Path -LiteralPath $secondStdoutPath) {
+              Get-Content -LiteralPath $secondStdoutPath | Out-Host
+            }
+            if (Test-Path -LiteralPath $secondStderrPath) {
+              Get-Content -LiteralPath $secondStderrPath | Out-Host
+            }
+            if ($secondProcess.ExitCode -ne 0) {
+              throw "The standalone ZIP account-isolation smoke test failed as a second standard user with exit code $($secondProcess.ExitCode)."
+            }
+
+            Write-Host "Signing out the second standard user before verifying its tournament after another ZIP replacement."
+            Remove-Item -LiteralPath $env:TT_TURNIER_UPDATED_ZIP_DIRECTORY -Recurse -Force
+            New-Item -ItemType Directory -Path $env:TT_TURNIER_UPDATED_ZIP_DIRECTORY -Force | Out-Null
+            [System.IO.Compression.ZipFile]::ExtractToDirectory($currentZip[0].FullName, $env:TT_TURNIER_UPDATED_ZIP_DIRECTORY)
+            & icacls.exe $env:TT_TURNIER_UPDATED_ZIP_DIRECTORY /grant "${identity}:(OI)(CI)M" /T /C
+            if ($LASTEXITCODE -ne 0) {
+              throw "Could not grant the first standard account permission to use the replacement ZIP app."
+            }
+            & icacls.exe $env:TT_TURNIER_UPDATED_ZIP_DIRECTORY /grant "${secondIdentity}:(OI)(CI)RX" /T /C
+            if ($LASTEXITCODE -ne 0) {
+              throw "Could not grant the second standard account read access to its replacement ZIP app."
+            }
+            & icacls.exe $env:TT_TURNIER_UPDATED_ZIP_DIRECTORY /grant "${unicodeIdentity}:(OI)(CI)RX" /T /C
+            if ($LASTEXITCODE -ne 0) {
+              throw "Could not grant the Unicode-profile standard account read access to the replacement ZIP app."
+            }
+            $secondReturnStdoutPath = Join-Path $secondWorkDirectory "return-after-replacement.stdout.log"
+            $secondReturnStderrPath = Join-Path $secondWorkDirectory "return-after-replacement.stderr.log"
+            $secondReturnArguments = '"{0}" --zip-second-return "{1}" --standard-user' -f $secondSmokeScriptPath, $env:TT_TURNIER_UPDATED_ZIP_APP_PATH
+            $secondReturnProcess = Start-Process -FilePath $nodePath -ArgumentList $secondReturnArguments -Credential $secondCredential -LoadUserProfile -WorkingDirectory $secondWorkDirectory -Wait -PassThru -RedirectStandardOutput $secondReturnStdoutPath -RedirectStandardError $secondReturnStderrPath
+            if (Test-Path -LiteralPath $secondReturnStdoutPath) {
+              Get-Content -LiteralPath $secondReturnStdoutPath | Out-Host
+            }
+            if (Test-Path -LiteralPath $secondReturnStderrPath) {
+              Get-Content -LiteralPath $secondReturnStderrPath | Out-Host
+            }
+            if ($secondReturnProcess.ExitCode -ne 0) {
+              throw "The second standard account could not confirm its own data remained isolated after ZIP replacement (exit code $($secondReturnProcess.ExitCode))."
+            }
+
+            $returnStdoutPath = Join-Path $workDirectory "return-after-second-account.stdout.log"
+            $returnStderrPath = Join-Path $workDirectory "return-after-second-account.stderr.log"
+            $returnArguments = '"{0}" --zip-return "{1}" --standard-user' -f $smokeScriptPath, $env:TT_TURNIER_UPDATED_ZIP_APP_PATH
+            $returnProcess = Start-Process -FilePath $nodePath -ArgumentList $returnArguments -Credential $credential -LoadUserProfile -WorkingDirectory $workDirectory -Wait -PassThru -RedirectStandardOutput $returnStdoutPath -RedirectStandardError $returnStderrPath
+            if (Test-Path -LiteralPath $returnStdoutPath) {
+              Get-Content -LiteralPath $returnStdoutPath | Out-Host
+            }
+            if (Test-Path -LiteralPath $returnStderrPath) {
+              Get-Content -LiteralPath $returnStderrPath | Out-Host
+            }
+            if ($returnProcess.ExitCode -ne 0) {
+              throw "The first standard account could not confirm its own data remained isolated after the second account signed in (exit code $($returnProcess.ExitCode))."
+            }
+          } finally {
+            $password.Dispose()
+            $secondPassword.Dispose()
+            $unicodePassword.Dispose()
+            $passwordText = $null
+            $secondPasswordText = $null
+            $unicodePasswordText = $null
+            if ($unicodeUser) {
+              Get-CimInstance -ClassName Win32_UserProfile -ErrorAction SilentlyContinue |
+                Where-Object { $_.SID -eq $unicodeUser.SID -and -not $_.Loaded } |
+                Remove-CimInstance -ErrorAction SilentlyContinue
+            }
+            Remove-LocalUser -Name $unicodeAccountName -ErrorAction SilentlyContinue
+            Remove-LocalUser -Name $secondAccountName -ErrorAction SilentlyContinue
+            Remove-LocalUser -Name $accountName -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $workDirectory, $secondWorkDirectory, $unicodeWorkDirectory -Recurse -Force -ErrorAction SilentlyContinue
+          }
+      - name: Verify tournament data survives a Windows profile restart
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $accountName = "ttrestart-$([guid]::NewGuid().ToString('N').Substring(0, 10))"
+          $passwordText = [Convert]::ToBase64String([Security.Cryptography.RandomNumberGenerator]::GetBytes(32))
+          $password = ConvertTo-SecureString $passwordText -AsPlainText -Force
+          $user = $null
+          $workDirectory = Join-Path $env:RUNNER_TEMP "tt-turnier-profile-restart-smoke"
+          $identity = "$env:COMPUTERNAME\$accountName"
+          $profile = $null
+
+          try {
+            $user = New-LocalUser -Name $accountName -Password $password -AccountNeverExpires -UserMayNotChangePassword -Description "Temporary Windows profile restart persistence smoke test account"
+            Add-LocalGroupMember -Group (Get-LocalGroup -SID "S-1-5-32-545") -Member $user
+            New-Item -ItemType Directory -Path $workDirectory -Force | Out-Null
+            & icacls.exe $workDirectory /grant "${identity}:(OI)(CI)M"
+            if ($LASTEXITCODE -ne 0) {
+              throw "Could not grant the temporary Windows account access to its smoke-test logs."
+            }
+            & icacls.exe $env:TT_TURNIER_INSTALL_DIRECTORY /grant "${identity}:(OI)(CI)RX" /T /C
+            if ($LASTEXITCODE -ne 0) {
+              throw "Could not grant the temporary Windows account read access to the installed app."
+            }
+
+            $nodePath = (Get-Command node).Source
+            $smokeScriptPath = Join-Path $env:GITHUB_WORKSPACE "artifacts/tt-turnier/scripts/windows-installer-smoke.mjs"
+            $credential = [PSCredential]::new($identity, $password)
+            $runSessionCheck = {
+              param($mode, $label)
+              $stdoutPath = Join-Path $workDirectory "$label.stdout.log"
+              $stderrPath = Join-Path $workDirectory "$label.stderr.log"
+              $arguments = '"{0}" {1} "{2}" --standard-user' -f $smokeScriptPath, $mode, $env:TT_TURNIER_APP_PATH
+              $process = Start-Process -FilePath $nodePath -ArgumentList $arguments -Credential $credential -LoadUserProfile -WorkingDirectory $workDirectory -Wait -PassThru -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
+              if (Test-Path -LiteralPath $stdoutPath) {
+                Get-Content -LiteralPath $stdoutPath | Out-Host
+              }
+              if (Test-Path -LiteralPath $stderrPath) {
+                Get-Content -LiteralPath $stderrPath | Out-Host
+              }
+              if ($process.ExitCode -ne 0) {
+                throw "The Windows profile restart $label check failed with exit code $($process.ExitCode)."
+              }
+            }
+
+            & $runSessionCheck "--windows-session-save" "save"
+
+            $profile = $null
+            for ($attempt = 0; $attempt -lt 30; $attempt++) {
+              $profile = Get-CimInstance -ClassName Win32_UserProfile |
+                Where-Object { $_.SID -eq $user.SID }
+              if ($profile -and -not $profile.Loaded) {
+                break
+              }
+              Start-Sleep -Seconds 1
+            }
+            if (-not $profile) {
+              throw "Windows did not retain a profile record after the save session ended."
+            }
+            if ($profile.Loaded) {
+              throw "Windows did not unload the temporary account profile after the save session ended."
+            }
+            Write-Host "Windows unloaded the temporary account profile after saving the tournament."
+
+            & $runSessionCheck "--windows-session-resume" "resume"
+          } finally {
+            $password.Dispose()
+            $passwordText = $null
+            if ($user) {
+              Get-CimInstance -ClassName Win32_UserProfile -ErrorAction SilentlyContinue |
+                Where-Object { $_.SID -eq $user.SID -and -not $_.Loaded } |
+                Remove-CimInstance -ErrorAction SilentlyContinue
+              Remove-LocalUser -Name $accountName -ErrorAction SilentlyContinue
+            }
+            Remove-Item -LiteralPath $workDirectory -Recurse -Force -ErrorAction SilentlyContinue
+          }
+      - name: Verify tournament data survives restart and installed app updates
+        run: pnpm --filter @workspace/tt-turnier run desktop:windows:installer:smoke "$env:TT_TURNIER_APP_PATH" "$env:TT_TURNIER_INSTALLER_PATH" "$env:TT_TURNIER_INSTALL_DIRECTORY" "$env:TT_TURNIER_ALTERNATE_INSTALL_DIRECTORY"
+
+  publish-release:
+    if: github.event_name == 'release'
+    permissions:
+      contents: write
+    needs: smoke-test-installer
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: tt-turnier-windows-builds
+          path: generated-artifacts/tt-turnier-windows
+      - name: Attach Windows builds to GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        shell: bash
+        run: |
+          bash ./scripts/publish-windows-release-assets.sh \
+            "$RELEASE_TAG" \
+            generated-artifacts/tt-turnier-windows

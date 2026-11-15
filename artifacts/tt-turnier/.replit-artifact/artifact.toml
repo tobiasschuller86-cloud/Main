@@ -1,0 +1,28 @@
+kind = "web"
+previewPath = "/"
+title = "Tischtennis-Turnier"
+description = "Eine deutschsprachige Turnierverwaltung für Tischtennisturniere mit Gruppenphase und anschließendem K.-o.-System. Teilnehmende verwalten, Gruppen auslosen, Spiele planen, Ergebnisse eintragen und Ranglisten automatisch aktualisieren."
+version = "1.0.0"
+id = "artifacts/tt-turnier"
+router = "path"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 20724
+
+[services.development]
+run = "pnpm --filter @workspace/tt-turnier run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/tt-turnier", "run", "build" ]
+serve = "static"
+publicDir = "artifacts/tt-turnier/dist/public"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "20724"
+BASE_PATH = "/"

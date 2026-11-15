@@ -1,0 +1,173 @@
+name: Windows signing check monitor
+
+on:
+  # Run independently of the weekly certificate workflow so it can detect a
+  # removed, disabled, or missed schedule in that workflow.
+  schedule:
+    - cron: "17 10 * * *"
+
+permissions:
+  actions: read
+  issues: write
+
+jobs:
+  alert-on-missed-certificate-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check scheduled Windows certificate workflow health
+        uses: actions/github-script@v7
+        env:
+          WINDOWS_SIGNING_MAINTAINERS: ${{ vars.WINDOWS_SIGNING_MAINTAINERS }}
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const staleAfterDays = 8;
+            const staleAfterMs = staleAfterDays * 24 * 60 * 60 * 1000;
+            const workflowUrl =
+              `${process.env.GITHUB_SERVER_URL}/${owner}/${repo}/actions/workflows/windows-installer.yml`;
+            const stoppedTitle = "Windows signing certificate check has stopped running";
+            const failedTitle = "Windows signing certificate check failed";
+            let workflowState = null;
+            let workflowMissing = false;
+
+            try {
+              const response = await github.rest.actions.getWorkflow({
+                owner,
+                repo,
+                workflow_id: "windows-installer.yml",
+              });
+              workflowState = response.data.state;
+            } catch (error) {
+              if (error.status !== 404) throw error;
+              workflowMissing = true;
+              core.warning("The Windows installer workflow was not found.");
+            }
+
+            const workflowDisabled =
+              !workflowMissing && workflowState !== "active";
+            let runs = [];
+            if (!workflowMissing) {
+              const response = await github.paginate(
+                github.rest.actions.listWorkflowRuns,
+                {
+                  owner,
+                  repo,
+                  workflow_id: "windows-installer.yml",
+                  event: "schedule",
+                  per_page: 100,
+                },
+                (result) => result.data.workflow_runs
+              );
+              runs = response;
+            }
+
+            const latestRun = runs[0];
+            const latestCompletedRun = runs.find((run) => run.status === "completed");
+            const latestRunTime = latestRun ? Date.parse(latestRun.created_at) : NaN;
+            const latestRunIsRecent =
+              Number.isFinite(latestRunTime) &&
+              Date.now() - latestRunTime <= staleAfterMs;
+            const stopped =
+              workflowMissing ||
+              workflowDisabled ||
+              !latestRun ||
+              !latestRunIsRecent;
+            const failed =
+              Boolean(latestCompletedRun) &&
+              latestCompletedRun.conclusion !== "success";
+
+            const issues = await github.paginate(github.rest.issues.listForRepo, {
+              owner,
+              repo,
+              state: "all",
+              per_page: 100,
+            });
+
+            async function updateAlert(title, shouldBeOpen, body) {
+              const alerts = issues.filter(
+                (issue) => !issue.pull_request && issue.title === title
+              );
+              const openAlerts = alerts.filter((issue) => issue.state === "open");
+              if (!shouldBeOpen) {
+                for (const issue of openAlerts) {
+                  await github.rest.issues.update({
+                    owner,
+                    repo,
+                    issue_number: issue.number,
+                    state: "closed",
+                  });
+                }
+                return;
+              }
+
+              const alert = openAlerts[0] || alerts[0];
+              if (alert) {
+                for (const duplicate of openAlerts.filter(
+                  (issue) => issue.number !== alert.number
+                )) {
+                  await github.rest.issues.update({
+                    owner,
+                    repo,
+                    issue_number: duplicate.number,
+                    state: "closed",
+                  });
+                }
+                await github.rest.issues.update({
+                  owner,
+                  repo,
+                  issue_number: alert.number,
+                  body,
+                  ...(alert.state === "closed" ? { state: "open" } : {}),
+                });
+                return;
+              }
+
+              await github.rest.issues.create({ owner, repo, title, body });
+            }
+
+            const maintainerMention =
+              process.env.WINDOWS_SIGNING_MAINTAINERS?.trim() || `@${owner}`;
+            let stoppedReason;
+            if (workflowMissing) {
+              stoppedReason = "The Windows installer workflow was not found.";
+            } else if (workflowDisabled) {
+              stoppedReason = `The Windows installer workflow is not active (state: ${workflowState}).`;
+            } else if (!latestRun) {
+              stoppedReason = "No scheduled Windows installer run was found.";
+            } else {
+              stoppedReason = `No scheduled Windows installer run has started within the last ${staleAfterDays} days.`;
+            }
+            const latestRunDetails = latestRun
+              ? [
+                  `Latest scheduled run: ${latestRun.created_at} (${latestRun.status}${latestRun.conclusion ? `, ${latestRun.conclusion}` : ""}).`,
+                  "",
+                  `[View the latest scheduled run](${latestRun.html_url})`,
+                ]
+              : [];
+            const stoppedBody = [
+              `${maintainerMention} The weekly Windows signing certificate check is not running as expected.`,
+              "",
+              stoppedReason,
+              ...latestRunDetails,
+              "",
+              `[Open the Windows installer workflow](${workflowUrl})`,
+            ].join("\n");
+            const failedRun = latestCompletedRun;
+            const failedBody = [
+              `${maintainerMention} The scheduled Windows signing certificate check failed.`,
+              "",
+              "The failure remains open until a later scheduled check completes successfully. Review the run for details; certificate and password values are never included in this alert.",
+              "",
+              failedRun
+                ? `[View the failed scheduled check](${failedRun.html_url})`
+                : `[Open the Windows installer workflow](${workflowUrl})`,
+            ].join("\n");
+
+            await updateAlert(stoppedTitle, stopped, stoppedBody);
+            await updateAlert(failedTitle, failed, failedBody);
+
+            if (!stopped && !failed) {
+              core.info(
+                `The latest scheduled certificate check succeeded at ${latestCompletedRun.created_at}.`
+              );
+            }
