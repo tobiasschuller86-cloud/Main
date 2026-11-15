@@ -51,6 +51,7 @@ if (zipLongPathSmoke && (executablePath.length < 240 || executablePath.length > 
 }
 if (
   !zipSmoke &&
+  !windowsSessionSmoke &&
   resolve(installDirectory).toLowerCase() === resolve(alternateInstallDirectory).toLowerCase()
 ) {
   throw new Error('The alternate Windows install directory must differ from the initial directory.');

@@ -13,7 +13,7 @@
     "desktop:windows:installer:package": "electron-builder --win nsis",
     "desktop:windows:zip:package": "electron-builder --win zip",
     "desktop:windows:installer:smoke": "node scripts/windows-installer-smoke.mjs",
-    "test:desktop-update": "node --test electron/update-check.test.cjs electron/external-links.test.cjs electron/release-config.test.cjs electron/windows-zip-update.test.cjs electron/durable-storage.test.cjs scripts/windows-recovery-smoke.test.mjs scripts/windows-overview-smoke.test.mjs scripts/windows-devtools-smoke.test.mjs",
+    "test:desktop-update": "node --test electron/update-check.test.cjs electron/external-links.test.cjs electron/release-config.test.cjs electron/windows-zip-update.test.cjs electron/durable-storage.test.cjs scripts/windows-recovery-smoke.test.mjs scripts/windows-overview-smoke.test.mjs scripts/windows-devtools-smoke.test.mjs scripts/windows-cli-smoke.test.mjs",
     "test:pair-editor-ui": "node --test scripts/pair-editor-ui.test.mjs",
     "test": "tsx --test src/lib/backup.test.ts src/lib/tournament.test.ts src/lib/desktop-storage.test.ts",
     "serve": "vite preview --config vite.config.ts --host 0.0.0.0",
