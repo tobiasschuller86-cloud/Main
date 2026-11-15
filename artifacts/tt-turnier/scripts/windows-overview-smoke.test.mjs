@@ -2,12 +2,34 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import vm from 'node:vm';
+import { EventEmitter } from 'node:events';
 
 const source = await readFile(new URL('./windows-installer-smoke.mjs', import.meta.url), 'utf8');
 const helper = source.slice(
   source.indexOf('async function verifyInitialOverview('),
   source.indexOf('async function verifyReleaseNotesLink('),
 );
+
+test('app launch retains bounded startup diagnostics without changing security arguments', () => {
+  const child = new EventEmitter();
+  child.stdout = new EventEmitter();
+  child.stderr = new EventEmitter();
+  const context = vm.createContext({
+    executablePath: 'test.exe',
+    debuggingPort: 9222,
+    spawn: (_file, args, options) => {
+      assert.ok(!args.includes('--no-sandbox'));
+      assert.deepEqual(Array.from(options.stdio), ['ignore', 'pipe', 'pipe']);
+      return child;
+    },
+  });
+  const launch = source.slice(source.indexOf('function launchApp('), source.indexOf('async function findAppPage('));
+  vm.runInContext(`${launch}\nlaunchApp();`, context);
+  child.stdout.emit('data', Buffer.from('x'.repeat(9_000)));
+  child.stderr.emit('data', Buffer.from('startup error'));
+  assert.equal(child.startupDiagnostics.length, 8_000);
+  assert.ok(child.startupDiagnostics.endsWith('startup error'));
+});
 
 test('temporary Windows account descriptions respect the 48-character system limit', async () => {
   const workflow = await readFile(

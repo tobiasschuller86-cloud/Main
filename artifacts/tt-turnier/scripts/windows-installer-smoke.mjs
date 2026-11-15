@@ -143,8 +143,14 @@ function launchApp() {
       `--remote-debugging-port=${debuggingPort}`,
       '--no-first-run',
     ],
-    { stdio: 'ignore', windowsHide: true },
+    { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true },
   );
+  appProcess.startupDiagnostics = '';
+  for (const stream of [appProcess.stdout, appProcess.stderr]) {
+    stream.on('data', (chunk) => {
+      appProcess.startupDiagnostics = `${appProcess.startupDiagnostics}${chunk}`.slice(-8_000);
+    });
+  }
   appProcess.on('error', (error) => {
     appProcess.launchError = error;
   });
@@ -219,6 +225,7 @@ async function evaluatePage(webSocketUrl, expression) {
 
 async function waitForAppPage(appProcess) {
   const deadline = Date.now() + startupTimeoutMs;
+  let lastDebuggingError;
   while (Date.now() < deadline) {
     if (appProcess.launchError) {
       throw new Error(
@@ -227,20 +234,21 @@ async function waitForAppPage(appProcess) {
     }
     if (appProcess.exitCode !== null || appProcess.signalCode !== null) {
       throw new Error(
-        `The Windows app at ${executablePath} exited before opening its main screen (exit code ${appProcess.exitCode}, signal ${appProcess.signalCode}).`,
+        `The Windows app at ${executablePath} exited before opening its main screen (exit code ${appProcess.exitCode}, signal ${appProcess.signalCode}). Startup output: ${appProcess.startupDiagnostics}`,
       );
     }
 
     try {
       const appPage = await findAppPage();
       if (appPage) return appPage;
-    } catch {
+    } catch (error) {
       // The debugging endpoint is not ready until Electron has started.
+      lastDebuggingError = error.message;
     }
     await delay(1_000);
   }
 
-  throw new Error(`The Windows app at ${executablePath} did not open its page within 60 seconds.`);
+  throw new Error(`The Windows app at ${executablePath} did not open its page within 60 seconds. Debugging endpoint: ${lastDebuggingError || 'reachable, but no app page found'}. Startup output: ${appProcess.startupDiagnostics}`);
 }
 
 async function waitForPageValue(webSocketUrl, expression, expected, description) {
