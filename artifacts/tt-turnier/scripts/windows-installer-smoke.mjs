@@ -123,7 +123,7 @@ function verifyStandardUserContext() {
 async function prepareStandardUserProfile() {
   const result = spawnSync('powershell.exe', [
     '-NoProfile', '-NonInteractive', '-Command',
-    "[Environment]::GetFolderPath('UserProfile') | ConvertTo-Json -Compress",
+    "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); [Environment]::GetFolderPath('UserProfile') | ConvertTo-Json -Compress",
   ], { encoding: 'utf8', windowsHide: true, timeout: 30_000, maxBuffer: 16_384 });
   if (result.error || result.status !== 0) {
     throw new Error(`Could not resolve the actual Windows account profile: ${result.error?.message || result.stderr}`);
@@ -320,6 +320,7 @@ function describeWindowsStartup(processId) {
     '-NoProfile', '-NonInteractive', '-Command',
     `
       $ErrorActionPreference = 'Stop'
+      [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
       $target = Get-Process -Id ${processId}
       $dialogText = @()
       try {

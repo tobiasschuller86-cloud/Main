@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import vm from 'node:vm';
@@ -25,8 +26,9 @@ for (const profile of ['C:\\Users\\temporary-one', 'C:\\Users\\temporary-two', '
     const preparation = source.slice(source.indexOf('async function prepareStandardUserProfile('), source.indexOf('async function verifyUnicodeProfileContext('));
     const context = vm.createContext({
       win32, process: { env }, console: { log() {} },
-      spawnSync: (_file, _args, options) => {
+      spawnSync: (_file, args, options) => {
         assert.equal(options.timeout, 30_000);
+        assert.match(args.at(-1), /\[Console\]::OutputEncoding = \[System\.Text\.UTF8Encoding\]::new\(\$false\)/);
         return { status: 0, stdout: JSON.stringify(profile) };
       },
       stat: async (directory) => {
@@ -63,6 +65,38 @@ test('standard-user startup rejects an invalid profile instead of reusing inheri
     await assert.rejects(context.prepare(), /existing absolute profile directory/);
     assert.equal(env.USERPROFILE, 'original-profile');
   }
+});
+
+test('the actual PowerShell output preserves umlauts and Japanese profile characters under an OEM default', async (t) => {
+  const executable = process.platform === 'win32' ? 'powershell.exe' : 'pwsh';
+  const profile = 'C:\\Users\\tt-smök-日本語';
+  const preparation = source.slice(source.indexOf('async function prepareStandardUserProfile('), source.indexOf('async function verifyUnicodeProfileContext('));
+  let unavailable = false;
+  const context = vm.createContext({
+    win32, process: { env: {} }, console: { log() {} },
+    spawnSync: (_file, args, options) => {
+      const command = args.at(-1);
+      assert.ok(command.includes("[Environment]::GetFolderPath('UserProfile')"));
+      const result = spawnSync(executable, [
+        ...args.slice(0, -1),
+        `[Console]::OutputEncoding = [System.Text.Encoding]::GetEncoding(437); ${command.replace("[Environment]::GetFolderPath('UserProfile')", `'${profile}'`)}`,
+      ], options);
+      if (process.platform !== 'win32' && result.error?.code === 'ENOENT') {
+        unavailable = true;
+        return { status: 0, stdout: JSON.stringify(profile) };
+      }
+      assert.equal(result.status, 0, result.error?.message || result.stderr);
+      return result;
+    },
+    stat: async (directory) => {
+      assert.equal(directory, profile);
+      return { isDirectory: () => true };
+    },
+    mkdir: async () => {},
+  });
+  vm.runInContext(`${preparation}\nglobalThis.prepare = prepareStandardUserProfile;`, context);
+  await context.prepare();
+  if (unavailable) t.skip('PowerShell is not installed on this non-Windows runner');
 });
 
 for (const [label, output, accepted] of [
