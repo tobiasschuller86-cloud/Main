@@ -34,12 +34,8 @@ test("production certificate validation does not load the test trust helper", ()
   assert.match(read("windows-signing-certificate.ps1"), /\$chain\.Build\(\$signingCertificate\)/);
 });
 
-test("certificate subprocess and affected workflow jobs have bounded execution", () => {
-  const certificateTest = read("test-windows-signing-certificate.ps1");
-  assert.match(certificateTest, /ReadToEndAsync\(\)/);
-  assert.match(certificateTest, /WaitForExit\(60000\)/);
-  assert.match(certificateTest, /\.Kill\(\$true\)/);
-  const workflow = read("../.github/workflows/windows-installer.yml");
+function assertWorkflowTimeouts(source) {
+  const workflow = source.replace(/\r\n?/g, "\n");
   for (const [job, limit] of [
     ["test-certificate-expiry", 10],
     ["test-partial-packaging-cleanup", 10],
@@ -49,4 +45,27 @@ test("certificate subprocess and affected workflow jobs have bounded execution",
     assert.ok(body, `Missing ${job}`);
     assert.match(body, new RegExp(`timeout-minutes: ${limit}\\b`));
   }
+}
+
+test("certificate subprocess has bounded execution", () => {
+  const certificateTest = read("test-windows-signing-certificate.ps1");
+  assert.match(certificateTest, /ReadToEndAsync\(\)/);
+  assert.match(certificateTest, /WaitForExit\(60000\)/);
+  assert.match(certificateTest, /\.Kill\(\$true\)/);
 });
+
+for (const [name, ending] of [["LF", "\n"], ["CRLF", "\r\n"]]) {
+  test(`workflow safeguards accept ${name} and reject missing jobs or limits`, () => {
+    const workflow = read("../.github/workflows/windows-installer.yml")
+      .replace(/\r\n?/g, "\n").replace(/\n/g, ending);
+    assertWorkflowTimeouts(workflow);
+    assert.throws(() => assertWorkflowTimeouts(workflow.replace(
+      "  test-certificate-expiry:", "  renamed-certificate-job:",
+    )), /Missing test-certificate-expiry/);
+    for (const limit of [10, 30]) {
+      assert.throws(() => assertWorkflowTimeouts(workflow.replaceAll(
+        `timeout-minutes: ${limit}`, "timeout-minutes: 99",
+      )), /timeout-minutes/);
+    }
+  });
+}

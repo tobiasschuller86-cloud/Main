@@ -176,6 +176,29 @@ function Invoke-CertificateCheck {
       -Password $Password `
       -NowUtc $NowUtc `
       -AllowExpired:$AllowExpired 6>&1)
+    $successOutput = @($capturedOutput | Where-Object {
+      $_ -isnot [System.Management.Automation.InformationRecord]
+    })
+    Assert-True (
+      $successOutput.Count -eq 1 -and $successOutput[0] -is [pscustomobject]
+    ) "Certificate preflight must return exactly one result, without collection indexes or extra success output."
+    Assert-True (
+      $successOutput[0].CertificateBytes -is [byte[]]
+    ) "Certificate preflight must retain a byte array, not an enumerated object array."
+    $roundTripCertificate = $null
+    try {
+      # Use the same property access and constructor as the packaging caller.
+      $roundTripCertificate = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new(
+        $successOutput[0].CertificateBytes,
+        $Password,
+        [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::EphemeralKeySet
+      )
+      Assert-True $roundTripCertificate.HasPrivateKey "Accepted PFX bytes could not reload their private signing key."
+    } finally {
+      if ($roundTripCertificate) {
+        $roundTripCertificate.Dispose()
+      }
+    }
     if ($capturedOutput.Count -gt 0 -and $capturedOutput[-1] -is [pscustomobject]) {
       $result = $capturedOutput[-1]
       $capturedOutput = @($capturedOutput | Select-Object -SkipLast 1)

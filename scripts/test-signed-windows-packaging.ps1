@@ -124,7 +124,7 @@ try {
     -Password $certificatePassword
   $packageOutput | ForEach-Object { Write-Host "$_" }
   if ($packageInvocationError) {
-    throw "The shared Windows packaging script failed during signed packaging."
+    throw "The shared Windows packaging script failed during signed packaging: $($packageInvocationError.Exception.Message)"
   }
   Assert-True ([string]::IsNullOrEmpty($env:WINDOWS_CERTIFICATE_BASE64)) "Signed packaging left the certificate environment value behind."
   Assert-True ([string]::IsNullOrEmpty($env:WINDOWS_CERTIFICATE_PASSWORD)) "Signed packaging left the password environment value behind."
@@ -196,7 +196,7 @@ try {
     -CertificateBase64 $certificateBase64 `
     -Password $certificatePassword
   if ($rebuildInvocationError) {
-    throw "The shared Windows packaging script failed during the same-version rebuild."
+    throw "The shared Windows packaging script failed during the same-version rebuild: $($rebuildInvocationError.Exception.Message)"
   }
   Assert-True ([string]::IsNullOrEmpty($env:WINDOWS_CERTIFICATE_BASE64)) "The signed rebuild left the certificate environment value behind."
   Assert-True ([string]::IsNullOrEmpty($env:WINDOWS_CERTIFICATE_PASSWORD)) "The signed rebuild left the password environment value behind."

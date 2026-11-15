@@ -19,7 +19,7 @@ try {
 
   if ($certificateInfo.HasCertificate) {
     $signingCertificate = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new(
-      $certificateInfo.CertificateBytes,
+      [byte[]]$certificateInfo.CertificateBytes,
       $certificatePassword,
       [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::EphemeralKeySet
     )

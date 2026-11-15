@@ -204,12 +204,12 @@ function Get-WindowsSigningCertificateInfo {
     $chain.ChainPolicy.RevocationMode = [System.Security.Cryptography.X509Certificates.X509RevocationMode]::NoCheck
     $chain.ChainPolicy.VerificationFlags = [System.Security.Cryptography.X509Certificates.X509VerificationFlags]::NoFlag
     $chain.ChainPolicy.VerificationTime = $now
-    $chain.ChainPolicy.ApplicationPolicy.Add(
+    [void]$chain.ChainPolicy.ApplicationPolicy.Add(
       [System.Security.Cryptography.Oid]::new("1.3.6.1.5.5.7.3.3")
     )
     foreach ($candidate in $certificateCollection) {
       if ($candidate.Thumbprint -ne $signingCertificate.Thumbprint) {
-        $chain.ChainPolicy.ExtraStore.Add($candidate)
+        [void]$chain.ChainPolicy.ExtraStore.Add($candidate)
       }
     }
     $chainBuilt = $false
