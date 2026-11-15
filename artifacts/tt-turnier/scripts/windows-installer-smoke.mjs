@@ -140,6 +140,7 @@ function launchApp() {
     [
       '--headless',
       '--disable-gpu',
+      '--enable-logging=stderr',
       `--remote-debugging-port=${debuggingPort}`,
       '--no-first-run',
     ],
@@ -248,7 +249,44 @@ async function waitForAppPage(appProcess) {
     await delay(1_000);
   }
 
-  throw new Error(`The Windows app at ${executablePath} did not open its page within 60 seconds. Debugging endpoint: ${lastDebuggingError || 'reachable, but no app page found'}. Startup output: ${appProcess.startupDiagnostics}`);
+  throw new Error(`The Windows app at ${executablePath} did not open its page within 60 seconds. Debugging endpoint: ${lastDebuggingError || 'reachable, but no app page found'}. Startup output: ${appProcess.startupDiagnostics}. Windows context: ${describeWindowsStartup(appProcess.pid)}`);
+}
+
+function describeWindowsStartup(processId) {
+  if (process.platform !== 'win32' || !Number.isSafeInteger(processId)) return 'unavailable';
+  const result = spawnSync('powershell.exe', [
+    '-NoProfile', '-NonInteractive', '-Command',
+    `
+      $ErrorActionPreference = 'Stop'
+      $target = Get-Process -Id ${processId}
+      $dialogText = @()
+      try {
+        Add-Type -AssemblyName UIAutomationClient
+        Add-Type -AssemblyName UIAutomationTypes
+        if ($target.MainWindowHandle -ne [IntPtr]::Zero) {
+          $root = [System.Windows.Automation.AutomationElement]::FromHandle($target.MainWindowHandle)
+          $dialogText = @($root.FindAll(
+            [System.Windows.Automation.TreeScope]::Subtree,
+            [System.Windows.Automation.Condition]::TrueCondition
+          ) | Select-Object -First 30 | ForEach-Object { $_.Current.Name })
+        }
+      } catch { $dialogText = @('Window inspection unavailable: ' + $_.Exception.Message) }
+      @{
+        ProcessId = $target.Id
+        Responding = $target.Responding
+        WindowTitle = $target.MainWindowTitle
+        WindowText = $dialogText
+        Profile = [Environment]::GetFolderPath('UserProfile')
+        AppData = [Environment]::GetFolderPath('ApplicationData')
+        EnvironmentProfile = $env:USERPROFILE
+        EnvironmentAppData = $env:APPDATA
+      } | ConvertTo-Json -Depth 3 -Compress
+    `,
+  ], { encoding: 'utf8', windowsHide: true, timeout: 10_000, maxBuffer: 32_768 });
+  if (result.error || result.status !== 0) {
+    return `inspection failed: ${result.error?.message || result.stderr?.slice(-2_000)}`;
+  }
+  return result.stdout.trim().slice(-8_000);
 }
 
 async function waitForPageValue(webSocketUrl, expression, expected, description) {

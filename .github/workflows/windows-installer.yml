@@ -1093,7 +1093,7 @@ jobs:
 
             $deeplyNestedStdoutPath = Join-Path $workDirectory "deeply-nested-smoke.stdout.log"
             $deeplyNestedStderrPath = Join-Path $workDirectory "deeply-nested-smoke.stderr.log"
-            $deeplyNestedArguments = '"{0}" --zip "{1}"' -f $smokeScriptPath, $env:TT_TURNIER_DEEPLY_NESTED_OLD_ZIP_APP_PATH
+            $deeplyNestedArguments = '"{0}" --zip "{1}" --standard-user' -f $smokeScriptPath, $env:TT_TURNIER_DEEPLY_NESTED_OLD_ZIP_APP_PATH
             $deeplyNestedProcess = Start-Process -FilePath $nodePath -ArgumentList $deeplyNestedArguments -Credential $credential -LoadUserProfile -WorkingDirectory $workDirectory -Wait -PassThru -RedirectStandardOutput $deeplyNestedStdoutPath -RedirectStandardError $deeplyNestedStderrPath
 
             if (Test-Path -LiteralPath $deeplyNestedStdoutPath) {

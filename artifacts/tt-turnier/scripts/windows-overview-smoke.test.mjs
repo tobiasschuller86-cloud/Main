@@ -31,6 +31,27 @@ test('app launch retains bounded startup diagnostics without changing security a
   assert.ok(child.startupDiagnostics.endsWith('startup error'));
 });
 
+test('native startup inspection is bounded and reports failures without overriding the launch error', () => {
+  let result = { status: 0, stdout: '{"WindowTitle":"Startup error"}' };
+  let calls = 0;
+  const context = vm.createContext({
+    process: { platform: 'win32' },
+    spawnSync: (_file, args, options) => {
+      calls++;
+      assert.equal(options.timeout, 10_000);
+      assert.ok(args.at(-1).includes('Get-Process -Id 1234'));
+      return result;
+    },
+  });
+  const diagnostic = source.slice(source.indexOf('function describeWindowsStartup('), source.indexOf('async function waitForPageValue('));
+  vm.runInContext(`${diagnostic}\nglobalThis.inspect = describeWindowsStartup;`, context);
+  assert.equal(context.inspect(1234), result.stdout);
+  result = { status: null, error: new Error('timed out') };
+  assert.match(context.inspect(1234), /inspection failed: timed out/);
+  assert.equal(context.inspect(undefined), 'unavailable');
+  assert.equal(calls, 2);
+});
+
 test('temporary Windows account descriptions respect the 48-character system limit', async () => {
   const workflow = await readFile(
     new URL('../../../.github/workflows/windows-installer.yml', import.meta.url), 'utf8',
