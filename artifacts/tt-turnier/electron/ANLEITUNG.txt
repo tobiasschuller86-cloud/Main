@@ -43,6 +43,16 @@ Lösche nicht den Datenordner im Windows-Benutzerprofil.
 Die App läuft lokal auf diesem Windows-Gerät und benötigt weder Replit noch
 eine Internetverbindung. Für Updateprüfung und Downloads wird Internet benötigt.
 Die Turnierdaten werden im Windows-Benutzerprofil der App gespeichert.
+Zusätzlich zum internen Browserspeicher schreibt die Desktop-App die Turnierdaten
+in %APPDATA%\Tischtennis-Turnier\tournament-storage.json. Änderungen werden dort
+über eine vollständig geschriebene temporäre Datei übernommen. Beim Start
+wird dieser Stand vor dem Öffnen der Turnieransicht wiederhergestellt.
+Vorhandene Daten älterer Desktop-Versionen werden beim ersten Start übernommen.
+Die Datei enthält alle lokalen Turniere und Wiederherstellungskopien; sie ist
+nicht dasselbe Format wie eine exportierte einzelne JSON-Turniersicherung.
+Bei Lese- oder Schreibfehlern zeigt die App eine Fehlermeldung und unterbricht
+die Bearbeitung, statt still ein leeres Turnier über die gespeicherten Daten
+zu schreiben. Bitte dann freien Speicherplatz und Schreibrechte prüfen.
 
 DATEN AUS DEM BROWSER ÜBERNEHMEN
 1. Öffne im bisherigen Browserprogramm Einstellungen > Datensicherung > Sicherung herunterladen.

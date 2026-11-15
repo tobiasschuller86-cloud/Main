@@ -543,10 +543,12 @@ async function verifyInitialOverview(webSocketUrl) {
       `({
         ready: document.readyState,
         navigation: Boolean(document.querySelector('#main-navigation')),
+        storageError: document.querySelector('[data-testid="desktop-storage-error"]')?.textContent || null,
         overview: document.querySelector('main .page-heading .eyebrow')?.textContent.trim() === 'Turnierübersicht'
           && Boolean(document.querySelector('main [data-testid="button-edit-tournament"]'))
       })`,
     );
+    if (screen.storageError) throw new Error(`Desktop storage initialization failed: ${screen.storageError}`);
     if (screen.ready === 'complete' && screen.navigation && screen.overview) return;
     await delay(250);
   }

@@ -4,6 +4,7 @@ const path = require('node:path');
 const { checkForNewerWindowsRelease } = require('./update-check.cjs');
 const { createWindowOpenHandler, openExternalSafely } = require('./external-links.cjs');
 const { stageAndLaunchWindowsZipUpdate } = require('./windows-zip-update.cjs');
+const { createDurableStorage, registerDurableStorageHandlers } = require('./durable-storage.cjs');
 
 protocol.registerSchemesAsPrivileged([
   {
@@ -18,6 +19,7 @@ protocol.registerSchemesAsPrivileged([
 
 const publicDirectory = path.resolve(__dirname, '../dist/public');
 app.setPath('userData', path.join(app.getPath('appData'), 'Tischtennis-Turnier'));
+registerDurableStorageHandlers(ipcMain, createDurableStorage(app.getPath('userData')));
 const mimeTypes = {
   '.css': 'text/css; charset=utf-8',
   '.html': 'text/html; charset=utf-8',

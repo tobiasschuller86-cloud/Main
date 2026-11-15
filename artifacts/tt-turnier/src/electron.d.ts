@@ -4,6 +4,8 @@ declare global {
   interface Window {
     ttTurnierDesktop?: {
       isWindows: boolean;
+      loadTournamentStorage: () => { ok: boolean; raw?: string | null; message?: string };
+      saveTournamentStorage: (snapshot: string) => { ok: boolean; message?: string };
       checkForUpdate: (releaseNotesUrl: string) => Promise<{
         status: 'available' | 'current' | 'unavailable' | 'unsupported';
         currentVersion?: string;

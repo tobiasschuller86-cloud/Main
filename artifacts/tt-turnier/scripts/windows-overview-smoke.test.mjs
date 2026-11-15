@@ -135,12 +135,13 @@ test('temporary Windows account descriptions respect the 48-character system lim
   }
 });
 
-function page({ ready = 'complete', navigation = true, overview = true, action = true, text = 'TURNIERÜBERSICHT' } = {}) {
+function page({ ready = 'complete', navigation = true, overview = true, action = true, text = 'TURNIERÜBERSICHT', storageError = null } = {}) {
   return {
     readyState: ready,
     body: { innerText: text },
     querySelector(selector) {
       if (selector === '#main-navigation') return navigation ? {} : null;
+      if (selector === '[data-testid="desktop-storage-error"]') return storageError ? { textContent: storageError } : null;
       if (selector === 'main .page-heading .eyebrow') {
         return overview ? { textContent: 'Turnierübersicht' } : null;
       }
@@ -179,6 +180,12 @@ test('overview recognition waits for the document and React page to finish loadi
   ]);
   await check.check();
   assert.equal(check.calls(), 3);
+});
+
+test('a desktop storage failure is reported immediately rather than mistaken for a slow launch', async () => {
+  const check = harness([page({ storageError: 'Cannot read saved tournament file' })]);
+  await assert.rejects(check.check(), /Desktop storage initialization failed: Cannot read saved tournament file/);
+  assert.equal(check.calls(), 1);
 });
 
 for (const [label, options] of [
