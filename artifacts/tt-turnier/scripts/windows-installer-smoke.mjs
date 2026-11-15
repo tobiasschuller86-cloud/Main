@@ -429,15 +429,24 @@ async function fillInput(webSocketUrl, selector, value) {
 }
 
 async function verifyInitialOverview(webSocketUrl) {
-  const screen = await evaluatePage(
-    webSocketUrl,
-    "({ ready: document.readyState, navigation: Boolean(document.querySelector('#main-navigation')), overview: document.body.innerText.includes('Turnierübersicht') })",
-  );
-  if (screen.ready !== 'complete' || !screen.navigation || !screen.overview) {
-    throw new Error(
-      `The installed app did not reach the overview screen: ${JSON.stringify(screen)}`,
+  const deadline = Date.now() + 15_000;
+  let screen;
+  while (Date.now() < deadline) {
+    screen = await evaluatePage(
+      webSocketUrl,
+      `({
+        ready: document.readyState,
+        navigation: Boolean(document.querySelector('#main-navigation')),
+        overview: document.querySelector('main .page-heading .eyebrow')?.textContent.trim() === 'Turnierübersicht'
+          && Boolean(document.querySelector('main [data-testid="button-edit-tournament"]'))
+      })`,
     );
+    if (screen.ready === 'complete' && screen.navigation && screen.overview) return;
+    await delay(250);
   }
+  throw new Error(
+    `The installed app did not reach the overview screen within 15 seconds: ${JSON.stringify(screen)}`,
+  );
 }
 
 async function verifyReleaseNotesLink(webSocketUrl) {
